@@ -3,10 +3,13 @@ import { Routes, Route } from 'react-router-dom';
 import { DashboardView } from './features/dashboard/DashboardView';
 import { OnboardingView } from './features/onboarding/OnboardingView';
 import { PropertiesView } from './features/properties/PropertiesView';
+import { MapView } from './features/map/MapView';
 import { TenantsView } from './features/tenants/TenantsView';
 import { LeasesView } from './features/leases/LeasesView';
 import { InvoicesView } from './features/invoices/InvoicesView';
 import { MaintenanceView } from './features/maintenance/MaintenanceView';
+import { MessengerHubView } from './features/messenger/MessengerHubView';
+import { UtilitySplitterView } from './features/utilities/UtilitySplitterView';
 import { VendorsView } from './features/vendors/VendorsView';
 import { ExpensesView } from './features/expenses/ExpensesView';
 import { ReportsView } from './features/reports/ReportsView';
@@ -19,10 +22,13 @@ export const AppRoutes: React.FC = () => {
       <Route path="/" element={<DashboardView />} />
       <Route path="/onboarding" element={<OnboardingView />} />
       <Route path="/properties" element={<PropertiesView />} />
+      <Route path="/map" element={<MapView />} />
       <Route path="/tenants" element={<TenantsView />} />
       <Route path="/leases" element={<LeasesView />} />
       <Route path="/invoices" element={<InvoicesView />} />
       <Route path="/maintenance" element={<MaintenanceView />} />
+      <Route path="/messenger" element={<MessengerHubView />} />
+      <Route path="/utility-splitter" element={<UtilitySplitterView />} />
       <Route path="/vendors" element={<VendorsView />} />
       <Route path="/expenses" element={<ExpensesView />} />
       <Route path="/reports" element={<ReportsView />} />

@@ -1,5 +1,4 @@
 import { db } from './client';
-import { generateUUID } from '../lib/uuid';
 import {
   Organization,
   User,
@@ -58,7 +57,7 @@ export function seedInitialData(force = false) {
     commission_value: 8, // 8%
   });
 
-  // 4. Properties
+  // 4. Properties (with latitude & longitude for interactive map)
   const prop1 = db.insertItem<Property>('properties', {
     id: 'prop_oak_ridge',
     org_id: orgId,
@@ -67,6 +66,8 @@ export function seedInitialData(force = false) {
     address: '742 Evergreen Terrace, Springfield, IL 62704',
     type: 'residential_apartment',
     country_code: 'US',
+    lat: 39.7817,
+    lng: -89.6501,
     notes: '12-unit residential building built in 2018.',
   });
 
@@ -78,7 +79,22 @@ export function seedInitialData(force = false) {
     address: '100 Ocean Boulevard, San Francisco, CA 94105',
     type: 'mixed_use',
     country_code: 'US',
+    lat: 37.788,
+    lng: -122.399,
     notes: 'Prime waterfront commercial office and loft units.',
+  });
+
+  const prop3 = db.insertItem<Property>('properties', {
+    id: 'prop_london_mews',
+    org_id: orgId,
+    owner_id: owner1.id,
+    name: 'Kensington Mews Residences',
+    address: '14 Kensington Mews, London SW7 2AZ, UK',
+    type: 'residential_apartment',
+    country_code: 'GB',
+    lat: 51.4988,
+    lng: -0.1789,
+    notes: 'Luxury townhouse suites in Central London.',
   });
 
   // 5. Units
@@ -196,7 +212,6 @@ export function seedInitialData(force = false) {
   });
 
   // 9. Invoices & Payments
-  // Invoice 1: Paid invoice
   const inv1 = db.insertItem<Invoice>('invoices', {
     id: 'inv_101_oct',
     lease_id: lease1.id,
@@ -221,7 +236,6 @@ export function seedInitialData(force = false) {
     paid_at: '2026-10-01T10:00:00Z',
   });
 
-  // Invoice 2: Overdue invoice with late fee!
   const inv2 = db.insertItem<Invoice>('invoices', {
     id: 'inv_102_sep',
     lease_id: lease2.id,

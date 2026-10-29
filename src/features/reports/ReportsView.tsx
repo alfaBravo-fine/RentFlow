@@ -5,7 +5,7 @@ import { formatMoney } from '../../lib/money';
 import { Card, CardHeader, CardTitle } from '../../components/ui/Card';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
-import { BarChart3, Download, FileText, Printer } from '../../components/icons';
+import { BarChart3, Download, FileText, Printer, FileSpreadsheet, Shield } from '../../components/icons';
 
 export const ReportsView: React.FC = () => {
   const pack = resolvePack();
@@ -17,29 +17,57 @@ export const ReportsView: React.FC = () => {
   const totalExpenses = expenses.reduce((acc: number, e: any) => acc + e.amount_minor, 0);
   const netOperatingIncome = totalRentCollected - totalExpenses;
 
+  // Calculate tax withholding estimation if applicable
+  const taxNotes = pack.tax;
+  const estimatedWithholdingTaxMinor = taxNotes.withholdingTaxOnRent ? Math.round(totalRentCollected * 0.1) : 0;
+
+  const handleExportPnLCSV = () => {
+    const csvContent =
+      `Category,Amount (${pack.currency.code})\n` +
+      `Gross Rental Income,${totalRentCollected / 100}\n` +
+      `Operating Expenses,${totalExpenses / 100}\n` +
+      `Net Operating Income (NOI),${netOperatingIncome / 100}\n` +
+      `Estimated Statutory Withholding Tax,${estimatedWithholdingTaxMinor / 100}\n`;
+
+    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `pnl_financial_report_${pack.code}_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+  };
+
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-[var(--text)]">Financial Reports & Statements</h1>
-          <p className="text-xs text-[var(--text-muted)] mt-0.5">Audit-ready income, expense, rent roll, and owner payout statements</p>
+          <h1 className="text-xl font-bold text-[var(--text)]">Tax & Financial P&L Statements</h1>
+          <p className="text-xs text-[var(--text-muted)] mt-0.5">
+            Jurisdiction: {pack.name} ({pack.code}) &bull; Customized Tax P&L Engine
+          </p>
         </div>
-        <Button variant="primary" size="sm" onClick={() => window.print()}>
-          <Printer className="w-3.5 h-3.5" />
-          <span>Print Audit Report</span>
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={handleExportPnLCSV}>
+            <FileSpreadsheet className="w-3.5 h-3.5" />
+            <span>Export P&L (CSV)</span>
+          </Button>
+          <Button variant="primary" size="sm" onClick={() => window.print()}>
+            <Printer className="w-3.5 h-3.5" />
+            <span>Print Audit Report</span>
+          </Button>
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <Card>
-          <span className="text-xs font-semibold text-[var(--text-muted)] uppercase">Total Rent Income YTD</span>
+          <span className="text-xs font-semibold text-[var(--text-muted)] uppercase">Gross Rental Income</span>
           <div className="mt-2 text-2xl font-bold number-tabular text-[var(--status-success-fg)]">
             {formatMoney(totalRentCollected, pack)}
           </div>
         </Card>
 
         <Card>
-          <span className="text-xs font-semibold text-[var(--text-muted)] uppercase">Total Operating Expenses</span>
+          <span className="text-xs font-semibold text-[var(--text-muted)] uppercase">Operating Expenses</span>
           <div className="mt-2 text-2xl font-bold number-tabular text-[var(--status-danger-fg)]">
             {formatMoney(totalExpenses, pack)}
           </div>
@@ -51,11 +79,19 @@ export const ReportsView: React.FC = () => {
             {formatMoney(netOperatingIncome, pack)}
           </div>
         </Card>
+
+        <Card>
+          <span className="text-xs font-semibold text-[var(--text-muted)] uppercase">Statutory Tax Notes</span>
+          <div className="mt-2 text-xs font-medium text-[var(--text)]">
+            {taxNotes.withholdingTaxOnRent ? `Withholding Tax (~10%): ${formatMoney(estimatedWithholdingTaxMinor, pack)}` : 'No rent withholding tax'}
+          </div>
+          <p className="text-[10px] text-[var(--text-subtle)] mt-1 line-clamp-2">{taxNotes.propertyTaxNote}</p>
+        </Card>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle>Available Printable Statements</CardTitle>
+          <CardTitle>Available Audit Statements</CardTitle>
           <Badge variant="info">Tabular Formatting</Badge>
         </CardHeader>
 

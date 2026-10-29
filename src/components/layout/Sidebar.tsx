@@ -12,16 +12,21 @@ import {
   BarChart3,
   Settings,
   RefreshCw,
-  Folder,
+  Map,
+  MessageSquare,
+  Calculator,
 } from '../icons';
 
 export const Sidebar: React.FC = () => {
   const navItems = [
     { to: '/', label: 'Dashboard', icon: Home },
     { to: '/properties', label: 'Properties & Units', icon: Building2 },
+    { to: '/map', label: 'Interactive Location Map', icon: Map },
     { to: '/tenants', label: 'Tenants Directory', icon: Users },
     { to: '/leases', label: 'Leases & Deposits', icon: FileText },
     { to: '/invoices', label: 'Rent Roll & Invoices', icon: Receipt },
+    { to: '/utility-splitter', label: 'Utility Bill Splitter', icon: Calculator },
+    { to: '/messenger', label: 'Messenger Hub', icon: MessageSquare },
     { to: '/maintenance', label: 'Maintenance Board', icon: Wrench },
     { to: '/vendors', label: 'Vendors', icon: HardHat },
     { to: '/expenses', label: 'Expenses & Income', icon: Banknote },
@@ -72,7 +77,7 @@ export const Sidebar: React.FC = () => {
           <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
           <div className="flex flex-col">
             <span className="text-xs font-semibold text-[var(--text)]">Offline Engine Active</span>
-            <span className="text-[10px] text-[var(--text-subtle)]">Local SQLite persistence</span>
+            <span className="text-[10px] text-[var(--text-subtle)] font-mono">Drive Cloud Auto-Sync</span>
           </div>
         </div>
       </div>

@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
-import { Search, Sun, Moon, LogIn, LogOut, RefreshCw, UserCheck } from '../icons';
+import { Search, Sun, Moon, LogIn, LogOut, RefreshCw, Copy, Globe } from '../icons';
 import { getStoredUser, initiateGoogleSignIn, signOutGoogle, GoogleUser } from '../../lib/google/auth';
 import { syncEngine } from '../../lib/sync';
+import { listAllPacks, getCountryPack } from '../../countries/resolver';
 import { CommandPalette } from './CommandPalette';
+import { QuickCopyPanel } from './QuickCopyPanel';
 
 export interface TopbarProps {
   isDarkMode: boolean;
@@ -12,7 +14,20 @@ export interface TopbarProps {
 export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme }) => {
   const [user, setUser] = useState<GoogleUser | null>(getStoredUser());
   const [isCommandOpen, setIsCommandOpen] = useState(false);
+  const [isQuickCopyOpen, setIsQuickCopyOpen] = useState(false);
+
+  const activeCountryCode = localStorage.getItem('rentflow_active_country_code') || 'US';
+  const [selectedPackCode, setSelectedPackCode] = useState(activeCountryCode);
+
   const pendingSyncs = syncEngine.getPendingCount();
+  const packs = listAllPacks();
+  const activePack = getCountryPack(selectedPackCode);
+
+  const handlePackChange = (code: string) => {
+    setSelectedPackCode(code);
+    localStorage.setItem('rentflow_active_country_code', code);
+    window.location.reload();
+  };
 
   const handleSignIn = async () => {
     const u = await initiateGoogleSignIn();
@@ -27,22 +42,50 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme }) => 
   return (
     <>
       <header className="h-14 border-b border-[var(--border)] bg-[var(--surface-raised)] px-6 flex items-center justify-between shrink-0">
-        {/* Command Search Trigger */}
-        <button
-          onClick={() => setIsCommandOpen(true)}
-          className="flex items-center gap-3 px-3 py-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] text-xs text-[var(--text-muted)] hover:border-[var(--border-strong)] transition-colors w-72 justify-between cursor-pointer"
-        >
-          <div className="flex items-center gap-2">
-            <Search className="w-3.5 h-3.5 text-[var(--text-subtle)]" />
-            <span>Search or jump to...</span>
-          </div>
-          <kbd className="px-1.5 py-0.5 rounded bg-[var(--bg)] border border-[var(--border)] text-[10px] font-mono text-[var(--text-subtle)]">
-            ⌘K
-          </kbd>
-        </button>
+        {/* Left: Command Search & Quick-Copy Trigger */}
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setIsCommandOpen(true)}
+            className="flex items-center gap-3 px-3 py-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] text-xs text-[var(--text-muted)] hover:border-[var(--border-strong)] transition-colors w-64 justify-between cursor-pointer"
+          >
+            <div className="flex items-center gap-2">
+              <Search className="w-3.5 h-3.5 text-[var(--text-subtle)]" />
+              <span>Search or jump to...</span>
+            </div>
+            <kbd className="px-1.5 py-0.5 rounded bg-[var(--bg)] border border-[var(--border)] text-[10px] font-mono text-[var(--text-subtle)]">
+              ⌘K
+            </kbd>
+          </button>
+
+          {/* Quick-Copy Utility Tool Button */}
+          <button
+            onClick={() => setIsQuickCopyOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] text-xs font-medium text-[var(--text-muted)] hover:text-[var(--accent)] hover:border-[var(--accent)] transition-colors cursor-pointer"
+            title="Open Quick-Copy Utility Drawer"
+          >
+            <Copy className="w-3.5 h-3.5 text-[var(--accent)]" />
+            <span>Quick-Copy</span>
+          </button>
+        </div>
 
         {/* Right Actions */}
         <div className="flex items-center gap-3">
+          {/* Global Country Pack Selector */}
+          <div className="flex items-center gap-1.5 px-2 py-1 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] text-xs font-semibold text-[var(--text)]">
+            <Globe className="w-3.5 h-3.5 text-[var(--accent)]" />
+            <select
+              value={selectedPackCode}
+              onChange={(e) => handlePackChange(e.target.value)}
+              className="bg-transparent border-0 focus:outline-none cursor-pointer font-semibold text-xs"
+            >
+              {packs.map((p) => (
+                <option key={p.code} value={p.code}>
+                  {p.flag} {p.currency.code} ({p.code})
+                </option>
+              ))}
+            </select>
+          </div>
+
           {/* Sync status queue badge */}
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[var(--surface)] border border-[var(--border)] text-xs font-mono text-[var(--text-muted)]">
             <RefreshCw className="w-3.5 h-3.5 text-[var(--text-subtle)]" />
@@ -82,13 +125,14 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme }) => 
               className="flex items-center gap-2 px-3 py-1.5 rounded-[6px] bg-[var(--accent)] text-white text-xs font-medium hover:bg-[var(--accent-hover)] transition-colors cursor-pointer"
             >
               <LogIn className="w-3.5 h-3.5" />
-              <span>Sign in with Google</span>
+              <span>Google Drive Auth</span>
             </button>
           )}
         </div>
       </header>
 
       <CommandPalette isOpen={isCommandOpen} onClose={() => setIsCommandOpen(false)} />
+      <QuickCopyPanel isOpen={isQuickCopyOpen} onClose={() => setIsQuickCopyOpen(false)} />
     </>
   );
 };

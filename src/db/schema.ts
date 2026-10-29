@@ -76,6 +76,8 @@ export interface Property {
   country_code: string;
   notes?: string | null;
   photo_url?: string | null;
+  lat?: number | null;
+  lng?: number | null;
   updated_at: number;
   device_id: string;
   deleted_at?: number | null;
@@ -247,31 +249,15 @@ export interface Expense {
   deleted_at?: number | null;
 }
 
-export interface Document {
+export interface UtilityBill {
   id: string;
-  org_id: string;
-  linked_type: 'property' | 'unit' | 'tenant' | 'lease' | 'expense' | 'vendor';
-  linked_id: string;
-  type: string;
-  file_path: string;
-  mime: string;
-  expires_at?: string | null;
-  tags_json?: string | null;
-  updated_at: number;
-  device_id: string;
-  deleted_at?: number | null;
-}
-
-export interface Notification {
-  id: string;
-  user_id: string;
-  channel: 'in_app' | 'whatsapp' | 'sms' | 'email';
-  template_key: string;
-  status: 'pending' | 'sent' | 'failed';
-  scheduled_at: string;
-  attempts: number;
-  sent_at?: string | null;
-  message_body?: string;
+  property_id: string;
+  utility_type: 'electricity' | 'water' | 'gas' | 'trash' | 'internet';
+  bill_period: string;
+  total_amount_minor: number;
+  split_method: 'by_sqft' | 'equal_headcount';
+  splits_json: string; // Tenant breakdown
+  created_at: number;
   updated_at: number;
   device_id: string;
   deleted_at?: number | null;
