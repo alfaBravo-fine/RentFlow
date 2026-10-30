@@ -205,6 +205,41 @@ export class DBClient {
 
     return { payment, allocatedInvoices };
   }
+
+  public exportAllData(): Record<string, any> {
+    const tables = [
+      'organizations',
+      'users',
+      'properties',
+      'units',
+      'tenants',
+      'leases',
+      'invoices',
+      'payments',
+      'credits',
+      'deposits',
+      'maintenance_requests',
+      'vendors',
+      'expenses',
+      'audit_log',
+      'sync_queue',
+      'rent_increases',
+    ];
+    const dump: Record<string, any> = {};
+    for (const t of tables) {
+      dump[t] = getStorageTable(t);
+    }
+    return dump;
+  }
+
+  public importAllData(data: Record<string, any>): void {
+    if (!data || typeof data !== 'object') throw new Error('Invalid database payload');
+    for (const [key, value] of Object.entries(data)) {
+      if (Array.isArray(value)) {
+        setStorageTable(key, value);
+      }
+    }
+  }
 }
 
 export const db = new DBClient();

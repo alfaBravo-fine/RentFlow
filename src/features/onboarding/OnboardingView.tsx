@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { listAllPacks, getCountryPack } from '../../countries/resolver';
 import { CountryPack } from '../../countries/types';
+import { usePackStore } from '../../countries/usePack';
 import { formatMoney } from '../../lib/money';
+import { useToast } from '../../components/toast/ToastContext';
 import { Card, CardHeader, CardTitle } from '../../components/ui/Card';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
@@ -10,13 +12,21 @@ import { useNavigate } from 'react-router-dom';
 
 export const OnboardingView: React.FC = () => {
   const packs = listAllPacks();
-  const [selectedCode, setSelectedCode] = useState('US');
+  const currentCode = usePackStore((s) => s.countryCode);
+  const setCountryCode = usePackStore((s) => s.setCountryCode);
+  const { showToast } = useToast();
+
+  const [selectedCode, setSelectedCode] = useState(currentCode);
   const navigate = useNavigate();
 
   const selectedPack = getCountryPack(selectedCode);
 
   const handleApplyPack = () => {
-    localStorage.setItem('rentflow_active_country_code', selectedCode);
+    setCountryCode(selectedCode);
+    showToast({
+      type: 'success',
+      message: `Jurisdiction updated to ${selectedPack.name} (${selectedPack.currency.code})!`,
+    });
     navigate('/');
   };
 
@@ -28,7 +38,7 @@ export const OnboardingView: React.FC = () => {
           <span>Country Pack Regional Customization</span>
         </h1>
         <p className="text-xs text-[var(--text-muted)] mt-1">
-          Select your local operating jurisdiction to load legal deposit limits, late fee rules, tax notes, and localized currency formatting.
+          Select your operating jurisdiction to configure statutory deposit limits, late fee rules, tax parameters, and localized currency formatting.
         </p>
       </div>
 
@@ -46,7 +56,7 @@ export const OnboardingView: React.FC = () => {
                 onClick={() => setSelectedCode(p.code)}
                 className={`w-full text-left p-3 rounded-[6px] border transition-all flex items-center justify-between cursor-pointer ${
                   isSelected
-                    ? 'border-[var(--accent)] bg-[var(--accent-subtle)] font-semibold'
+                    ? 'border-[var(--accent)] bg-[var(--accent-subtle)] font-semibold ring-1 ring-[var(--accent)]'
                     : 'border-[var(--border)] bg-[var(--surface-raised)] hover:bg-[var(--surface)]'
                 }`}
               >
@@ -54,7 +64,9 @@ export const OnboardingView: React.FC = () => {
                   <span className="text-xl">{p.flag}</span>
                   <div>
                     <p className="text-sm text-[var(--text)]">{p.name}</p>
-                    <p className="text-xs text-[var(--text-subtle)] font-mono">{p.currency.code} ({p.currency.symbol})</p>
+                    <p className="text-xs text-[var(--text-subtle)] font-mono">
+                      {p.currency.code} ({p.currency.symbol}) &bull; {p.areaUnit}
+                    </p>
                   </div>
                 </div>
                 {isSelected && <Check className="w-4 h-4 text-[var(--accent)]" />}
@@ -71,7 +83,9 @@ export const OnboardingView: React.FC = () => {
                 <span className="text-3xl">{selectedPack.flag}</span>
                 <div>
                   <CardTitle>{selectedPack.name} Jurisdiction Rules</CardTitle>
-                  <p className="text-xs text-[var(--text-muted)]">Locale: {selectedPack.locale} &bull; Area: {selectedPack.areaUnit.toUpperCase()}</p>
+                  <p className="text-xs text-[var(--text-muted)]">
+                    Locale: {selectedPack.locale} &bull; Area: {selectedPack.areaUnit.toUpperCase()}
+                  </p>
                 </div>
               </div>
               <Badge variant="info">Pack v{selectedPack.version}</Badge>
@@ -79,7 +93,9 @@ export const OnboardingView: React.FC = () => {
 
             {/* Currency Preview Box */}
             <div className="p-4 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] space-y-2">
-              <span className="text-xs font-semibold text-[var(--text-muted)] uppercase">Live Currency Formatting Sample</span>
+              <span className="text-xs font-semibold text-[var(--text-muted)] uppercase">
+                Live Currency Formatting Sample
+              </span>
               <div className="text-2xl font-bold number-tabular text-[var(--accent)]">
                 {formatMoney(125000, selectedPack)}
               </div>
@@ -123,7 +139,9 @@ export const OnboardingView: React.FC = () => {
 
             {/* Legal Notes List */}
             <div className="space-y-2">
-              <span className="text-xs font-semibold text-[var(--text-muted)] uppercase">Statutory Legal Notes</span>
+              <span className="text-xs font-semibold text-[var(--text-muted)] uppercase">
+                Statutory Legal Notes
+              </span>
               <ul className="space-y-1 text-xs text-[var(--text-muted)] list-disc pl-4">
                 {selectedPack.legalNotes.map((note, idx) => (
                   <li key={idx}>{note}</li>

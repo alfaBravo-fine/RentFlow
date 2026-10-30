@@ -8,8 +8,9 @@ import { TenantsView } from './features/tenants/TenantsView';
 import { LeasesView } from './features/leases/LeasesView';
 import { InvoicesView } from './features/invoices/InvoicesView';
 import { MaintenanceView } from './features/maintenance/MaintenanceView';
-import { MessengerHubView } from './features/messenger/MessengerHubView';
+import { MessengerHubView } from './features/messengers/MessengerHubView';
 import { UtilitySplitterView } from './features/utilities/UtilitySplitterView';
+import { AreaCalculatorView } from './features/calculators/AreaCalculatorView';
 import { VendorsView } from './features/vendors/VendorsView';
 import { ExpensesView } from './features/expenses/ExpensesView';
 import { ReportsView } from './features/reports/ReportsView';
@@ -27,8 +28,9 @@ export const AppRoutes: React.FC = () => {
       <Route path="/leases" element={<LeasesView />} />
       <Route path="/invoices" element={<InvoicesView />} />
       <Route path="/maintenance" element={<MaintenanceView />} />
-      <Route path="/messenger" element={<MessengerHubView />} />
       <Route path="/utility-splitter" element={<UtilitySplitterView />} />
+      <Route path="/area-calculator" element={<AreaCalculatorView />} />
+      <Route path="/messenger" element={<MessengerHubView />} />
       <Route path="/vendors" element={<VendorsView />} />
       <Route path="/expenses" element={<ExpensesView />} />
       <Route path="/reports" element={<ReportsView />} />

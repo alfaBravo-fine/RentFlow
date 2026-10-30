@@ -66,6 +66,11 @@ import {
   CheckSquare,
   Sparkles,
   Share2,
+  Info,
+  XCircle,
+  History,
+  TrendingUp,
+  Percent,
 } from 'lucide-react';
 
 export {
@@ -135,4 +140,9 @@ export {
   CheckSquare,
   Sparkles,
   Share2,
+  Info,
+  XCircle,
+  History,
+  TrendingUp,
+  Percent,
 };

@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { getCountryPack } from '../../src/countries/resolver';
+import { getCountryPack, resolvePack } from '../../src/countries/resolver';
 import { formatMoney, toMinor, toMajor } from '../../src/lib/money';
 import { accrueDepositInterest } from '../../src/lib/interest';
 import { computeLateFee } from '../../src/lib/lateFee';
+import { convertArea } from '../../src/lib/units';
 
 describe('Money Engine Unit Tests', () => {
   it('formats JPY with 0 decimal places', () => {
@@ -108,5 +109,28 @@ describe('Late Fee Engine Unit Tests', () => {
       '2026-10-01'
     );
     expect(res.isCharity).toBe(true);
+  });
+});
+
+describe('Land Area Unit Calculator Tests (Section 8.4)', () => {
+  it('converts sqft to sqm correctly', () => {
+    // 1000 sqft * 0.092903 = 92.90 sqm
+    expect(convertArea(1000, 'sqft', 'sqm')).toBe(92.9);
+  });
+
+  it('converts Marla to sqft in Pakistan standard', () => {
+    // 1 marla_pk = 25.2929 sqm = ~272.25 sqft
+    const sqft = convertArea(1, 'marla_pk', 'sqft');
+    expect(Math.round(sqft)).toBe(272);
+  });
+
+  it('converts Kanal to Marla (20 Marla = 1 Kanal)', () => {
+    const marla = convertArea(1, 'kanal_pk', 'marla_pk');
+    expect(Math.round(marla)).toBe(20);
+  });
+
+  it('converts acres to hectares', () => {
+    const hectares = convertArea(1, 'acre', 'hectare');
+    expect(hectares).toBe(0.4);
   });
 });

@@ -15,6 +15,7 @@ import {
   Map,
   MessageSquare,
   Calculator,
+  Layers,
 } from '../icons';
 
 export const Sidebar: React.FC = () => {
@@ -26,6 +27,7 @@ export const Sidebar: React.FC = () => {
     { to: '/leases', label: 'Leases & Deposits', icon: FileText },
     { to: '/invoices', label: 'Rent Roll & Invoices', icon: Receipt },
     { to: '/utility-splitter', label: 'Utility Bill Splitter', icon: Calculator },
+    { to: '/area-calculator', label: 'Land Area Calculator', icon: Layers },
     { to: '/messenger', label: 'Messenger Hub', icon: MessageSquare },
     { to: '/maintenance', label: 'Maintenance Board', icon: Wrench },
     { to: '/vendors', label: 'Vendors', icon: HardHat },
@@ -44,7 +46,7 @@ export const Sidebar: React.FC = () => {
         </div>
         <div className="flex flex-col">
           <span className="font-semibold text-sm tracking-tight text-[var(--text)]">RentFlow</span>
-          <span className="text-[11px] text-[var(--text-subtle)] font-mono">v1.0 &bull; Desktop</span>
+          <span className="text-[11px] text-[var(--text-subtle)] font-mono">v2.0 &bull; Desktop</span>
         </div>
       </div>
 

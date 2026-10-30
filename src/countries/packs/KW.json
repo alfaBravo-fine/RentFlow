@@ -2,7 +2,7 @@
   "code": "KW",
   "name": "Kuwait",
   "flag": "🇰🇼",
-  "locale": "ar-KW",
+  "locale": "en-KW",
   "timezones": ["Asia/Kuwait"],
   "rtl": true,
   "currency": {

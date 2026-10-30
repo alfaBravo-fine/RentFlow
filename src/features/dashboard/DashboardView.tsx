@@ -1,7 +1,7 @@
 import React from 'react';
 import { db } from '../../db/client';
 import { Property, Unit, Lease, Invoice, MaintenanceRequest } from '../../db/schema';
-import { resolvePack } from '../../countries/resolver';
+import { usePack } from '../../countries/usePack';
 import { formatMoney } from '../../lib/money';
 import { Card, CardHeader, CardTitle } from '../../components/ui/Card';
 import { Badge } from '../../components/ui/Badge';
@@ -12,7 +12,7 @@ import { useNavigate } from 'react-router-dom';
 
 export const DashboardView: React.FC = () => {
   const navigate = useNavigate();
-  const pack = resolvePack();
+  const pack = usePack();
 
   const properties = db.getTable<Property>('properties');
   const units = db.getTable<Unit>('units');
@@ -34,7 +34,6 @@ export const DashboardView: React.FC = () => {
   const totalArrearsMinor = overdueInvoices.reduce((acc, i) => acc + (i.total_minor - i.amount_paid_minor), 0);
 
   const openMaintenanceCount = maintenance.filter((m) => m.status !== 'completed' && m.status !== 'closed').length;
-  const expiringLeasesCount = leases.filter((l) => l.status === 'expiring' || l.status === 'active').length;
 
   // Monthly Revenue Chart Data
   const chartData = [
@@ -48,11 +47,11 @@ export const DashboardView: React.FC = () => {
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
       {/* Top Banner / Actions */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold tracking-tight text-[var(--text)]">Property Management Command</h1>
           <p className="text-xs text-[var(--text-muted)] mt-0.5">
-            Real-time offline portfolio performance &bull; {totalUnits} Units Across {properties.length} Properties
+            Real-time offline portfolio performance &bull; {totalUnits} Units Across {properties.length} Properties ({pack.name} {pack.currency.code})
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -131,7 +130,7 @@ export const DashboardView: React.FC = () => {
         {/* Left 2 Cols: Monthly Collection Trend */}
         <Card className="lg:col-span-2">
           <CardHeader>
-            <CardTitle>Rent Collection vs. Target (2-Tone)</CardTitle>
+            <CardTitle>Rent Collection vs. Target (Two-Tone)</CardTitle>
             <Badge variant="info">Tabular Financial Engine</Badge>
           </CardHeader>
           <div className="h-64 w-full">

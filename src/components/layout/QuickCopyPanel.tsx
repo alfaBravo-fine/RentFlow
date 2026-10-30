@@ -65,9 +65,9 @@ export const QuickCopyPanel: React.FC<QuickCopyPanelProps> = ({ isOpen, onClose 
                     </button>
                   </div>
                   <div className="flex items-center justify-between text-[11px] text-[var(--text-muted)]">
-                    <span className="truncate">{p.address}</span>
+                    <span className="truncate">{p.address_line1 || p.address || '—'}</span>
                     <button
-                      onClick={() => handleCopy(p.address, 'Address')}
+                      onClick={() => handleCopy(p.address_line1 || p.address || '', 'Address')}
                       className="p-1 rounded hover:bg-[var(--surface-raised)] text-[var(--text-subtle)] hover:text-[var(--accent)] cursor-pointer"
                       title="Copy full address"
                     >

@@ -6,6 +6,7 @@ import { AppRoutes } from './routes';
 import { LoginView } from './features/auth/LoginView';
 import { getStoredUser, GoogleUser } from './lib/google/auth';
 import { seedInitialData } from './db/seed';
+import { ToastProvider } from './components/toast/ToastContext';
 
 const queryClient = new QueryClient();
 
@@ -34,20 +35,24 @@ export default function App() {
   // If user is not authenticated and hasn't yet dismissed first-launch boot login screen
   if (!user && !hasDismissedBootAuth) {
     return (
-      <LoginView
-        onSignedIn={handleSignedIn}
-        onContinueOffline={handleContinueOffline}
-      />
+      <ToastProvider>
+        <LoginView
+          onSignedIn={handleSignedIn}
+          onContinueOffline={handleContinueOffline}
+        />
+      </ToastProvider>
     );
   }
 
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <Layout>
-          <AppRoutes />
-        </Layout>
-      </BrowserRouter>
+      <ToastProvider>
+        <BrowserRouter>
+          <Layout>
+            <AppRoutes />
+          </Layout>
+        </BrowserRouter>
+      </ToastProvider>
     </QueryClientProvider>
   );
 }

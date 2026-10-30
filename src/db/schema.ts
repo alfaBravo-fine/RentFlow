@@ -71,11 +71,18 @@ export interface Property {
   org_id: string;
   owner_id?: string | null;
   name: string;
-  address: string;
-  type: 'residential_apartment' | 'single_family' | 'commercial' | 'mixed_use';
+  address_line1?: string | null;
+  address_line2?: string | null;
+  address?: string;
+  city?: string | null;
+  region?: string | null;
+  postal_code?: string | null;
+  type: 'residential_apartment' | 'single_family' | 'commercial' | 'mixed_use' | 'land';
   country_code: string;
   notes?: string | null;
   photo_url?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
   lat?: number | null;
   lng?: number | null;
   updated_at: number;
@@ -246,6 +253,20 @@ export interface Expense {
   notes?: string | null;
   updated_at: number;
   device_id: string;
+  deleted_at?: number | null;
+}
+
+export interface RentIncrease {
+  id: string;
+  unit_id: string;
+  old_amount_minor: number;
+  new_amount_minor: number;
+  effective_date: string;
+  reason?: string | null;
+  user_id?: string | null;
+  created_at: number;
+  updated_at?: number;
+  device_id?: string;
   deleted_at?: number | null;
 }
 

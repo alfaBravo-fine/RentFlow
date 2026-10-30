@@ -3,6 +3,8 @@ import { Search, Sun, Moon, LogIn, LogOut, RefreshCw, Copy, Globe } from '../ico
 import { getStoredUser, initiateGoogleSignIn, signOutGoogle, GoogleUser } from '../../lib/google/auth';
 import { syncEngine } from '../../lib/sync';
 import { listAllPacks, getCountryPack } from '../../countries/resolver';
+import { usePackStore } from '../../countries/usePack';
+import { useToast } from '../toast/ToastContext';
 import { CommandPalette } from './CommandPalette';
 import { QuickCopyPanel } from './QuickCopyPanel';
 
@@ -16,27 +18,32 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme }) => 
   const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [isQuickCopyOpen, setIsQuickCopyOpen] = useState(false);
 
-  const activeCountryCode = localStorage.getItem('rentflow_active_country_code') || 'US';
-  const [selectedPackCode, setSelectedPackCode] = useState(activeCountryCode);
+  const countryCode = usePackStore((s) => s.countryCode);
+  const setCountryCode = usePackStore((s) => s.setCountryCode);
+  const { showToast } = useToast();
 
   const pendingSyncs = syncEngine.getPendingCount();
   const packs = listAllPacks();
-  const activePack = getCountryPack(selectedPackCode);
 
   const handlePackChange = (code: string) => {
-    setSelectedPackCode(code);
-    localStorage.setItem('rentflow_active_country_code', code);
-    window.location.reload();
+    setCountryCode(code);
+    const p = getCountryPack(code);
+    showToast({
+      type: 'success',
+      message: `Switched region to ${p.name} (${p.currency.code})`,
+    });
   };
 
   const handleSignIn = async () => {
     const u = await initiateGoogleSignIn();
     setUser(u);
+    showToast({ type: 'success', message: `Signed in as ${u.name}` });
   };
 
   const handleSignOut = () => {
     signOutGoogle();
     setUser(null);
+    showToast({ type: 'info', message: 'Signed out of Google Drive' });
   };
 
   return (
@@ -70,11 +77,11 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme }) => 
 
         {/* Right Actions */}
         <div className="flex items-center gap-3">
-          {/* Global Country Pack Selector */}
+          {/* Global Country Pack Selector (Reactive Zustand) */}
           <div className="flex items-center gap-1.5 px-2 py-1 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] text-xs font-semibold text-[var(--text)]">
             <Globe className="w-3.5 h-3.5 text-[var(--accent)]" />
             <select
-              value={selectedPackCode}
+              value={countryCode}
               onChange={(e) => handlePackChange(e.target.value)}
               className="bg-transparent border-0 focus:outline-none cursor-pointer font-semibold text-xs"
             >

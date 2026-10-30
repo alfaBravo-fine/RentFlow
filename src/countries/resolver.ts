@@ -30,6 +30,8 @@ export function listAllPacks(): CountryPack[] {
   return Object.values(COUNTRY_PACKS);
 }
 
+export const AVAILABLE_PACKS = listAllPacks();
+
 export interface ResolvePackOptions {
   countryCode?: string | null;
   currencyCode?: string | null;
