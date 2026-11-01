@@ -1,13 +1,10 @@
 import React, { useState } from 'react';
-import { useGoogleLogin } from '@react-oauth/google';
 import { useAuthStore } from '../../stores/authStore';
-import { findDriveBackupFile, pullFromGoogleDrive } from '../../lib/googleDriveService';
 import { Card } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
 import { Badge } from '../../components/ui/Badge';
 import { ShieldCheck, Lock, RefreshCw, AlertCircle, Database, Folder } from '../../components/icons';
 import { RentFlowLogo } from '../../components/brand/RentFlowLogo';
-
 import { GOOGLE_CLIENT_ID } from '../../config/google';
 import { isTauri, tauriGoogleOAuth, tauriDrivePullBackup } from '../../lib/tauri/bridge';
 
@@ -19,74 +16,19 @@ export const LoginView: React.FC = () => {
 
   const [statusText, setStatusText] = useState<string | null>(null);
 
-  const googleClientId = GOOGLE_CLIENT_ID;
-
-  const handleGoogleSignIn = useGoogleLogin({
-    scope: 'openid email profile https://www.googleapis.com/auth/drive.appdata',
-    prompt: 'consent',
-    onSuccess: async (tokenResponse) => {
-      try {
-        setAuthenticating(true, null);
-        setStatusText('Google OAuth Authorized! Fetching user profile...');
-
-        const accessToken = tokenResponse.access_token;
-
-        // 1. Fetch real user profile from Google UserInfo
-        const userinfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-          headers: { Authorization: `Bearer ${accessToken}` },
-        });
-
-        if (!userinfoRes.ok) {
-          throw new Error('Failed to retrieve user profile from Google UserInfo API.');
-        }
-
-        const userinfo = await userinfoRes.json();
-
-        // 2. Pull & Restore cloud backup if local DB is empty
-        setStatusText('Checking cloud storage for existing backup...');
-        const restored = await pullFromGoogleDrive(accessToken, userinfo.sub);
-        
-        // 3. Search for existing RentFlowBackup.enc or create if new user
-        setStatusText('Accessing Google Drive appDataFolder...');
-        const driveFileId = (await findDriveBackupFile(accessToken)) || '';
-
-        // 4. Unlock app session
-        setStatusText('Authorization & Drive setup successful!');
-        setGoogleSession(
-          {
-            sub: userinfo.sub,
-            email: userinfo.email,
-            name: userinfo.name,
-            picture: userinfo.picture,
-          },
-          accessToken,
-          driveFileId
-        );
-
-        if (restored) {
-          setStatusText('Cloud backup successfully restored! Reloading dashboard...');
-          setTimeout(() => window.location.reload(), 600);
-          return;
-        }
-      } catch (err: any) {
-        console.error('Google Sign-In post-processing error:', err);
-        setAuthenticating(false, err.message || 'Failed to complete Google Drive initialization.');
-      } finally {
-        setStatusText(null);
-      }
-    },
-    onError: (errorResponse) => {
-      console.error('Google Sign-In Error:', errorResponse);
-      setAuthenticating(false, 'Google Sign-In popup was closed or authorization failed.');
-    },
-  });
-
-  const handleDesktopSignIn = async () => {
+  const handleSignIn = async () => {
     try {
       setAuthenticating(true, null);
       setStatusText('Starting Desktop loopback server & opening browser...');
 
-      const profile = await tauriGoogleOAuth();
+      let profile;
+      if (isTauri()) {
+        profile = await tauriGoogleOAuth();
+      } else {
+        const { invoke } = await import('@tauri-apps/api/core');
+        profile = await invoke<any>('google_login');
+      }
+
       setStatusText('Signed in successfully! Checking encrypted cloud backup...');
 
       // Pull & restore cloud backup in Rust backend
@@ -108,28 +50,12 @@ export const LoginView: React.FC = () => {
         setTimeout(() => window.location.reload(), 600);
       }
     } catch (err: any) {
-      console.error('[Tauri Desktop Sign-in] Error:', err);
+      console.error('[Desktop Sign-in] Error:', err);
       setAuthenticating(false, err.message || 'Desktop OAuth failed.');
     } finally {
       setStatusText(null);
     }
   };
-
-  if (!googleClientId) {
-    return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--bg-base)] p-6">
-        <Card className="p-8 max-w-md w-full text-center space-y-4 border-rose-500/30 bg-rose-500/5">
-          <AlertCircle className="w-12 h-12 text-rose-600 mx-auto" />
-          <h2 className="text-lg font-bold text-rose-700 dark:text-rose-300">
-            Missing Google Client ID
-          </h2>
-          <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
-            <code className="font-mono font-bold">VITE_GOOGLE_CLIENT_ID</code> is missing from your environment. Please ensure it is defined in your <code className="font-mono font-bold">.env</code> file.
-          </p>
-        </Card>
-      </div>
-    );
-  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--bg-base)] p-4 sm:p-6 overflow-y-auto">
@@ -202,7 +128,7 @@ export const LoginView: React.FC = () => {
               <RefreshCw className="w-4 h-4 animate-spin shrink-0" />
               <div>
                 <strong className="block font-semibold">Authenticating with Google...</strong>
-                <span className="text-[11px] opacity-90">{statusText || 'Opening Google OAuth Popup...'}</span>
+                <span className="text-[11px] opacity-90">{statusText || 'Opening System Default Browser...'}</span>
               </div>
             </div>
           )}
@@ -220,15 +146,7 @@ export const LoginView: React.FC = () => {
               type="button"
               variant="primary"
               className="w-full py-3 h-12 gap-3 font-semibold text-sm rounded-xl cursor-pointer shadow-md transition-all active:scale-[0.99]"
-              onClick={() => {
-                if (isTauri()) {
-                  handleDesktopSignIn();
-                } else {
-                  setAuthenticating(true, null);
-                  setStatusText('Opening Google OAuth Popup...');
-                  handleGoogleSignIn();
-                }
-              }}
+              onClick={handleSignIn}
               disabled={isAuthenticating}
             >
               <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">

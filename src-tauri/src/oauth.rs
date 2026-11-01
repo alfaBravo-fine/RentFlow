@@ -64,7 +64,7 @@ pub fn get_client_credentials() -> (String, String) {
 }
 
 #[tauri::command]
-pub async fn google_oauth(
+pub async fn google_login(
     state: State<'_, AuthState>,
 ) -> Result<UserProfile, String> {
     dotenvy::dotenv().ok();
@@ -79,7 +79,7 @@ pub async fn google_oauth(
 
     let (tx, rx) = tokio::sync::oneshot::channel::<String>();
 
-    // 1. Start one-shot loopback server on 127.0.0.1:<random_port>
+    // 1. Start one-shot loopback server on 127.0.0.1:<random_port> using tauri-plugin-oauth
     let port = tauri_plugin_oauth::start(move |url| {
         if let Ok(parsed_url) = reqwest::Url::parse(&url) {
             for (k, v) in parsed_url.query_pairs() {
@@ -111,7 +111,7 @@ code_challenge_method=S256",
         urlencoding::encode(&pkce_challenge.as_str()),
     );
 
-    // 3. Open system default browser
+    // 3. Open user's system default browser
     open::that(&auth_url).map_err(|e| format!("Failed to open default system browser: {}", e))?;
 
     // 4. Await authorization code from loopback redirect
@@ -178,6 +178,13 @@ code_challenge_method=S256",
 
     // 8. Return ONLY profile to the frontend
     Ok(profile)
+}
+
+#[tauri::command]
+pub async fn google_oauth(
+    state: State<'_, AuthState>,
+) -> Result<UserProfile, String> {
+    google_login(state).await
 }
 
 #[tauri::command]

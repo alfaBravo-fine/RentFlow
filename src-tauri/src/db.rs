@@ -24,6 +24,23 @@ const ALLOWED_TABLES: &[&str] = &[
     "utility_bills",
 ];
 
+pub fn open_connection(db_path: &Path, key: &str) -> Result<Connection, String> {
+    if let Some(parent) = db_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create db dir: {}", e))?;
+    }
+
+    let conn = Connection::open(db_path)
+        .map_err(|e| format!("Failed to open SQLite database: {}", e))?;
+
+    // Enable SQLCipher AES-256 encryption on disk
+    conn.execute(&format!("PRAGMA key = '{}';", key), [])
+        .map_err(|e| format!("Failed to set SQLCipher PRAGMA key: {}", e))?;
+    let _ = conn.execute("PRAGMA cipher_compatibility = 4;", []);
+    let _ = conn.execute("PRAGMA foreign_keys = ON;", []);
+
+    Ok(conn)
+}
+
 pub struct DatabaseManager {
     pub conn: Mutex<Connection>,
     pub db_path: PathBuf,
@@ -31,25 +48,25 @@ pub struct DatabaseManager {
 
 impl DatabaseManager {
     pub fn new(db_path: PathBuf) -> Result<Self, String> {
-        if let Some(parent) = db_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("Failed to create db dir: {}", e))?;
-        }
-
-        let conn = Connection::open(&db_path)
-            .map_err(|e| format!("Failed to open SQLite database: {}", e))?;
-
-        // 1. Enable SQLCipher AES-256 encryption on disk
-        conn.execute(&format!("PRAGMA key = '{}';", SQLCIPHER_PASSPHRASE), [])
-            .map_err(|e| format!("Failed to set SQLCipher PRAGMA key: {}", e))?;
-        let _ = conn.execute("PRAGMA cipher_compatibility = 4;", []);
-        let _ = conn.execute("PRAGMA foreign_keys = ON;", []);
-
+        let conn = open_connection(&db_path, SQLCIPHER_PASSPHRASE)?;
         let mgr = Self {
             conn: Mutex::new(conn),
             db_path,
         };
 
-        // 2. Run initial schema migrations
+        // Run initial schema migrations
+        mgr.run_migrations()?;
+
+        Ok(mgr)
+    }
+
+    pub fn new_with_key(db_path: PathBuf, key: &str) -> Result<Self, String> {
+        let conn = open_connection(&db_path, key)?;
+        let mgr = Self {
+            conn: Mutex::new(conn),
+            db_path,
+        };
+
         mgr.run_migrations()?;
 
         Ok(mgr)
@@ -393,6 +410,64 @@ pub async fn db_get_table(
 }
 
 #[tauri::command]
+pub async fn db_get_item(
+    table_name: String,
+    id: String,
+    state: tauri::State<'_, DatabaseManager>,
+) -> Result<Option<Value>, String> {
+    validate_table_name(&table_name)?;
+
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    let sql = format!(
+        "SELECT * FROM {} WHERE id = ? AND deleted_at IS NULL LIMIT 1",
+        table_name
+    );
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let column_names: Vec<String> = stmt
+        .column_names()
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let mut rows = stmt
+        .query_map(params![id], |row| {
+            let mut map = serde_json::Map::new();
+            for (i, name) in column_names.iter().enumerate() {
+                let val_ref = row.get_ref(i)?;
+                let json_val = match val_ref {
+                    rusqlite::types::ValueRef::Null => Value::Null,
+                    rusqlite::types::ValueRef::Integer(n) => json!(n),
+                    rusqlite::types::ValueRef::Real(f) => json!(f),
+                    rusqlite::types::ValueRef::Text(s) => {
+                        let text = String::from_utf8_lossy(s).to_string();
+                        if (text.starts_with('{') && text.ends_with('}'))
+                            || (text.starts_with('[') && text.ends_with(']'))
+                        {
+                            serde_json::from_str(&text).unwrap_or(json!(text))
+                        } else {
+                            json!(text)
+                        }
+                    }
+                    rusqlite::types::ValueRef::Blob(b) => json!(base64::encode(b)),
+                };
+                map.insert(name.clone(), json_val);
+            }
+            Ok(Value::Object(map))
+        })
+        .map_err(|e| e.to_string())?;
+
+    if let Some(first) = rows.next() {
+        match first {
+            Ok(val) => Ok(Some(val)),
+            Err(e) => Err(e.to_string()),
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+#[tauri::command]
 pub async fn db_insert_item(
     table_name: String,
     item: Value,
@@ -675,4 +750,30 @@ pub async fn db_import_all(
     }
 
     Ok(())
+}
+
+// Backup Database File (Creates an encrypted copy of the SQLite database file at user-selected location)
+#[tauri::command]
+pub async fn db_backup_file(
+    destination_path: String,
+    state: tauri::State<'_, DatabaseManager>,
+) -> Result<String, String> {
+    if destination_path.contains("..") || destination_path.contains('\0') {
+        return Err("Security Violation: Path traversal or invalid character detected".into());
+    }
+
+    let dest = PathBuf::from(&destination_path);
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            fs::create_dir_all(parent).map_err(|e| format!("Failed to create destination directory: {}", e))?;
+        }
+    }
+
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    let _ = conn.execute("PRAGMA wal_checkpoint(FULL);", []);
+
+    fs::copy(&state.db_path, &dest)
+        .map_err(|e| format!("Failed to copy database file: {}", e))?;
+
+    Ok(format!("Database file successfully backed up to {}", destination_path))
 }

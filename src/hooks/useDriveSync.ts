@@ -146,27 +146,35 @@ export function useDriveSync() {
     };
   }, [isAuthenticated, user, accessToken]);
 
-  // 2. Zero-delay instant sync on DB write (no 5-second debounce)
+function isAutoSyncEnabled(): boolean {
+  try {
+    return localStorage.getItem('rentflow_auto_sync_enabled') !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+  // 2. Zero-delay instant sync on DB write
   useEffect(() => {
-    if (!isAuthenticated || !user || !accessToken) return;
+    if (!isAuthenticated || !user) return;
 
     const unsubscribe = db.onWrite(() => {
-      // Instant synchronization: Zero debounce delay
-      triggerUpload();
+      if (isAutoSyncEnabled()) {
+        triggerUpload();
+      }
     });
 
     return () => {
       unsubscribe();
     };
-  }, [isAuthenticated, user, accessToken, triggerUpload]);
+  }, [isAuthenticated, user, triggerUpload]);
 
   // 3. Instant sync on tab close / beforeunload
   useEffect(() => {
-    if (!isAuthenticated || !user || !accessToken) return;
+    if (!isAuthenticated || !user) return;
 
     const handleBeforeUnload = () => {
-      if (!isSyncingRef.current) {
-        // Attempt quick sync trigger
+      if (isAutoSyncEnabled() && !isSyncingRef.current) {
         triggerUpload();
       }
     };
@@ -175,7 +183,7 @@ export function useDriveSync() {
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload);
     };
-  }, [isAuthenticated, user, accessToken, triggerUpload]);
+  }, [isAuthenticated, user, triggerUpload]);
 
   return {
     syncState,

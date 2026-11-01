@@ -13,6 +13,8 @@ import { useDriveSync } from './hooks/useDriveSync';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { KeyboardShortcutsModal } from './components/layout/KeyboardShortcutsModal';
 
+import { databaseService } from './db/DatabaseService';
+
 const queryClient = new QueryClient();
 
 function AuthenticatedContent() {
@@ -21,6 +23,8 @@ function AuthenticatedContent() {
   const { isHelpOpen, setIsHelpOpen } = useKeyboardShortcuts(syncNow);
 
   useEffect(() => {
+    // Initialize SQLCipher database via Tauri if in desktop mode
+    databaseService.initialize();
     // Seed initial fixtures if empty
     seedInitialData(false);
     // Initialize automated 24h statutory late fee scanner

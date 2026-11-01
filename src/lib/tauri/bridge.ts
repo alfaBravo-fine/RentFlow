@@ -71,6 +71,10 @@ export async function tauriDbImportAll(data: Record<string, any[]>): Promise<voi
   return invokeTauri<void>('db_import_all', { data });
 }
 
+export async function tauriBackupDatabaseFile(destinationPath: string): Promise<string> {
+  return invokeTauri<string>('db_backup_file', { destinationPath });
+}
+
 // --- Production Google OAuth (Desktop Loopback) ---
 
 export interface TauriUserProfile {

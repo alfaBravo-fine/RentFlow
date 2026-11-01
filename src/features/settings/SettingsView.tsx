@@ -7,6 +7,7 @@ import { Card, CardHeader, CardTitle } from '../../components/ui/Card';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
+import { Modal } from '../../components/ui/Modal';
 import {
   Settings,
   RefreshCw,
@@ -23,6 +24,7 @@ import {
   FileSpreadsheet,
   FileText,
   CheckCircle2,
+  Lock,
 } from '../../components/icons';
 import { useToast } from '../../components/toast/ToastContext';
 import { useAuthStore } from '../../stores/authStore';
@@ -30,12 +32,23 @@ import { useDriveSync } from '../../hooks/useDriveSync';
 import { db } from '../../db/client';
 import { Property, Tenant } from '../../db/schema';
 import { generateUUID } from '../../lib/uuid';
+import { isTauri, tauriBackupDatabaseFile } from '../../lib/tauri/bridge';
 
 export const SettingsView: React.FC = () => {
   const pack = usePack();
   const setCountryCode = usePackStore((s) => s.setCountryCode);
   const { showToast } = useToast();
   const { syncState, syncNow } = useDriveSync();
+
+  // Auto Sync State
+  const [autoSyncEnabled, setAutoSyncEnabled] = useState<boolean>(() => {
+    return localStorage.getItem('rentflow_auto_sync_enabled') !== 'false';
+  });
+
+  // Backup Database Modal State
+  const [isBackupModalOpen, setIsBackupModalOpen] = useState(false);
+  const [backupDestinationPath, setBackupDestinationPath] = useState('');
+  const [isBackingUp, setIsBackingUp] = useState(false);
 
   // Agency Commission
   const [agencyCommission, setAgencyCommission] = useState<number>(() => {
@@ -58,6 +71,18 @@ export const SettingsView: React.FC = () => {
   const [isImportingCsv, setIsImportingCsv] = useState(false);
 
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+
+  const handleToggleAutoSync = () => {
+    const nextState = !autoSyncEnabled;
+    setAutoSyncEnabled(nextState);
+    localStorage.setItem('rentflow_auto_sync_enabled', String(nextState));
+    showToast({
+      type: 'info',
+      message: nextState
+        ? 'Automatic background synchronization enabled.'
+        : 'Automatic background synchronization disabled.',
+    });
+  };
 
   const handlePackChange = (newCode: string) => {
     setCountryCode(newCode);
@@ -332,6 +357,39 @@ export const SettingsView: React.FC = () => {
     reader.readAsText(file);
   };
 
+  const handleOpenBackupModal = () => {
+    if (!isTauri()) {
+      handleExportBackup();
+    } else {
+      setIsBackupModalOpen(true);
+    }
+  };
+
+  const handleBackupDatabaseSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!backupDestinationPath.trim()) {
+      showToast({ type: 'error', message: 'Please enter a valid target file path.' });
+      return;
+    }
+    setIsBackingUp(true);
+    try {
+      const savedPath = await tauriBackupDatabaseFile(backupDestinationPath.trim());
+      showToast({
+        type: 'success',
+        message: `Encrypted SQLite database backup saved to: ${savedPath}`,
+      });
+      setIsBackupModalOpen(false);
+      setBackupDestinationPath('');
+    } catch (err: any) {
+      showToast({
+        type: 'error',
+        message: err.message || 'Database backup failed.',
+      });
+    } finally {
+      setIsBackingUp(false);
+    }
+  };
+
   const handleResetDemo = () => {
     localStorage.clear();
     seedInitialData(true);
@@ -601,16 +659,44 @@ export const SettingsView: React.FC = () => {
           designated <code className="bg-[var(--bg-base)] px-1.5 py-0.5 rounded text-[11px] font-mono">App_RentFlow_Backups</code> folder.
         </p>
 
+        {/* Auto Sync Toggle Switch */}
+        <div className="p-4 rounded-2xl bg-[var(--bg-base)] border border-[var(--border-subtle)] flex items-center justify-between">
+          <div>
+            <div className="text-xs font-semibold text-[var(--text-primary)]">
+              Automatic Background Synchronization
+            </div>
+            <div className="text-[11px] text-[var(--text-secondary)] mt-0.5">
+              Automatically backs up database changes to Google Drive in the background after local modifications.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleToggleAutoSync}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-[var(--accent)] focus:ring-offset-2 ${
+              autoSyncEnabled ? 'bg-emerald-600' : 'bg-gray-300 dark:bg-gray-700'
+            }`}
+            role="switch"
+            aria-checked={autoSyncEnabled}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                autoSyncEnabled ? 'translate-x-5' : 'translate-x-0'
+              }`}
+            />
+          </button>
+        </div>
+
         <div className="flex flex-wrap items-center gap-3 pt-2">
+          {/* Manual Sync Now Button */}
           <Button
             variant="primary"
             size="sm"
             onClick={async () => {
               setIsForceSyncing(true);
               try {
-                showToast({ type: 'info', message: 'Executing Google Drive multipart upload...' });
+                showToast({ type: 'info', message: 'Executing Google Drive sync...' });
                 await syncNow();
-                showToast({ type: 'success', message: 'Force Sync executed! Database backed up to Google Drive.' });
+                showToast({ type: 'success', message: 'Sync Now complete! Database backed up to Google Drive.' });
               } catch (err: any) {
                 showToast({ type: 'error', message: err.message || 'Drive sync failed' });
               } finally {
@@ -621,10 +707,16 @@ export const SettingsView: React.FC = () => {
             className="gap-2"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isForceSyncing || syncState === 'syncing' ? 'animate-spin' : ''}`} />
-            <span>{isForceSyncing || syncState === 'syncing' ? 'Syncing...' : 'Force Sync to Google Drive'}</span>
+            <span>{isForceSyncing || syncState === 'syncing' ? 'Syncing...' : 'Sync Now'}</span>
           </Button>
 
-          <Button variant="outline" size="sm" onClick={handleExportBackup}>
+          {/* Backup Database Button */}
+          <Button variant="outline" size="sm" onClick={handleOpenBackupModal} className="gap-2">
+            <Lock className="w-3.5 h-3.5 text-emerald-600" />
+            <span>Backup Database</span>
+          </Button>
+
+          <Button variant="outline" size="sm" onClick={handleExportBackup} className="gap-2">
             <Download className="w-3.5 h-3.5" />
             <span>Export Encrypted Snapshot (.json)</span>
           </Button>
@@ -679,6 +771,56 @@ export const SettingsView: React.FC = () => {
           </div>
         )}
       </Card>
+
+      {/* Backup Database Modal */}
+      <Modal
+        isOpen={isBackupModalOpen}
+        onClose={() => setIsBackupModalOpen(false)}
+        title="Backup Encrypted SQLite Database"
+        description="Creates a bit-for-bit AES-256 encrypted snapshot copy of the active SQLCipher database file."
+        maxWidth="md"
+      >
+        <form onSubmit={handleBackupDatabaseSubmit} className="space-y-4">
+          <div>
+            <label className="block text-xs font-semibold text-[var(--text-primary)] mb-1">
+              Destination File Path
+            </label>
+            <Input
+              type="text"
+              placeholder="e.g. C:\Backups\rentflow_backup.db or /home/user/rentflow_backup.db"
+              value={backupDestinationPath}
+              onChange={(e) => setBackupDestinationPath(e.target.value)}
+              className="w-full text-xs font-mono"
+              required
+            />
+            <p className="text-[11px] text-[var(--text-secondary)] mt-1.5">
+              Specify the absolute destination file path where the encrypted SQLite database should be saved.
+            </p>
+          </div>
+
+          <div className="flex items-center justify-end gap-2 pt-2 border-t border-[var(--border-subtle)]">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setIsBackupModalOpen(false)}
+              disabled={isBackingUp}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              variant="primary"
+              size="sm"
+              disabled={isBackingUp}
+              className="gap-2"
+            >
+              <Lock className="w-3.5 h-3.5" />
+              <span>{isBackingUp ? 'Backing up...' : 'Create Backup'}</span>
+            </Button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 };
