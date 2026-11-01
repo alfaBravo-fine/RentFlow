@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { BrowserRouter } from 'react-router-dom';
+import { HashRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Layout } from './components/layout/Layout';
 import { AppRoutes } from './routes';
@@ -25,11 +25,11 @@ function AuthenticatedApp() {
   }, []);
 
   return (
-    <BrowserRouter>
+    <HashRouter>
       <Layout>
         <AppRoutes />
       </Layout>
-    </BrowserRouter>
+    </HashRouter>
   );
 }
 
