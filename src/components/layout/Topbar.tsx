@@ -1,0 +1,457 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import {
+  Search,
+  Sun,
+  Moon,
+  LogIn,
+  LogOut,
+  RefreshCw,
+  Copy,
+  Globe,
+  Menu,
+  Bell,
+  Clock,
+  Wrench,
+  AlertCircle,
+  Plus,
+  FileText,
+  Building2,
+  Receipt,
+  X,
+  ChevronDown,
+  CheckCircle,
+  Database,
+  Cloud,
+  CloudOff,
+} from '../icons';
+import { getStoredUser, signOutGoogle, GoogleUser } from '../../lib/google/auth';
+import { syncEngine } from '../../lib/sync';
+import { listAllPacks, getCountryPack } from '../../countries/resolver';
+import { usePackStore } from '../../countries/usePack';
+import { useAuthStore } from '../../stores/authStore';
+import { useDriveSync } from '../../hooks/useDriveSync';
+import { useToast } from '../toast/ToastContext';
+import { CommandPalette } from './CommandPalette';
+import { QuickCopyPanel } from './QuickCopyPanel';
+import { db } from '../../db/client';
+import { Lease, MaintenanceRequest, Tenant, Unit, DocumentVaultItem } from '../../db/schema';
+import { formatLeaseName } from '../../lib/formatNames';
+
+export interface TopbarProps {
+  isDarkMode: boolean;
+  onToggleTheme: () => void;
+  onOpenSidebar?: () => void;
+}
+
+export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme, onOpenSidebar }) => {
+  const navigate = useNavigate();
+  const user = useAuthStore((s) => s.user);
+  const signOut = useAuthStore((s) => s.signOut);
+  const [isCommandOpen, setIsCommandOpen] = useState(false);
+  const [isQuickCopyOpen, setIsQuickCopyOpen] = useState(false);
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
+  const [isQuickActionOpen, setIsQuickActionOpen] = useState(false);
+
+  const notificationsRef = useRef<HTMLDivElement>(null);
+  const quickActionsRef = useRef<HTMLDivElement>(null);
+
+  const countryCode = usePackStore((s) => s.countryCode);
+  const setCountryCode = usePackStore((s) => s.setCountryCode);
+  const { showToast } = useToast();
+  const { syncState, lastSyncedAt, syncError } = useDriveSync();
+
+  const pendingSyncs = syncEngine.getPendingCount();
+  const packs = listAllPacks();
+
+  // Close popovers on click outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (notificationsRef.current && !notificationsRef.current.contains(e.target as Node)) {
+        setIsNotificationsOpen(false);
+      }
+      if (quickActionsRef.current && !quickActionsRef.current.contains(e.target as Node)) {
+        setIsQuickActionOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Compute Active Alerts
+  const leases = db.getTable<Lease>('leases');
+  const tenants = db.getTable<Tenant>('tenants');
+  const units = db.getTable<Unit>('units');
+  const maintenance = db.getTable<MaintenanceRequest>('maintenance_requests');
+  const documents = db.getTable<DocumentVaultItem>('documents');
+
+  const now = new Date().getTime();
+  const sixtyDaysMs = 60 * 24 * 60 * 60 * 1000;
+  const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+
+  const expiringLeases = leases.filter((l) => {
+    if (l.status === 'expired' || l.status === 'terminated') return false;
+    const endMs = new Date(l.end_date).getTime();
+    const diff = endMs - now;
+    return diff <= sixtyDaysMs; // Within 60 days or already overdue
+  });
+
+  const pendingMaintenance = maintenance.filter(
+    (m) => m.status !== 'completed' && m.status !== 'closed'
+  );
+
+  const expiringDocuments = documents.filter((d) => {
+    if (d.deleted_at || !d.expiry_date) return false;
+    const expMs = new Date(d.expiry_date).getTime();
+    const diff = expMs - now;
+    return diff <= thirtyDaysMs;
+  });
+
+  const totalAlertsCount = expiringLeases.length + pendingMaintenance.length + expiringDocuments.length;
+
+  const handlePackChange = (code: string) => {
+    setCountryCode(code);
+    const p = getCountryPack(code);
+    showToast({
+      type: 'success',
+      message: `Switched region to ${p.name} (${p.currency.code})`,
+    });
+  };
+
+
+
+  const handleSignOut = async () => {
+    await signOut();
+    showToast({ type: 'info', message: 'Signed out of Google Drive' });
+  };
+
+  return (
+    <>
+      <header className="h-16 border-b border-[var(--border-subtle)] bg-[var(--bg-surface)] px-4 sm:px-8 flex items-center justify-between shrink-0 gap-3">
+        {/* Left: Mobile Toggle & Global Search Input */}
+        <div className="flex items-center gap-2 sm:gap-3 flex-1 max-w-xl">
+          {/* Mobile hamburger menu toggle */}
+          <button
+            onClick={onOpenSidebar}
+            className="md:hidden w-9 h-9 rounded-full flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-base)] cursor-pointer"
+            title="Open Navigation"
+          >
+            <Menu className="w-5 h-5" />
+          </button>
+
+          {/* Global Search Input Bar (Linear style) */}
+          <button
+            onClick={() => setIsCommandOpen(true)}
+            className="flex items-center gap-3 px-3.5 h-[42px] rounded-xl border border-[var(--border-strong)] bg-[var(--bg-base)] text-xs text-[var(--text-secondary)] hover:border-[var(--accent)] hover:bg-[var(--bg-surface)] transition-all w-full max-w-md justify-between cursor-pointer focus-ring"
+          >
+            <div className="flex items-center gap-2.5 truncate">
+              <Search className="w-4 h-4 text-[var(--text-subtle)] shrink-0" />
+              <span className="truncate">Search properties, leases, tenants...</span>
+            </div>
+            <kbd className="hidden sm:inline px-2 py-0.5 rounded-md bg-[var(--bg-surface)] border border-[var(--border-strong)] text-[10px] font-mono text-[var(--text-secondary)] shadow-2xs">
+              ⌘K
+            </kbd>
+          </button>
+
+          {/* Quick-Copy Drawer Button */}
+          <button
+            onClick={() => setIsQuickCopyOpen(true)}
+            className="hidden xl:flex items-center gap-1.5 px-3 h-[42px] rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--accent)] hover:border-[var(--accent)] transition-all cursor-pointer"
+            title="Open Quick-Copy Utility Drawer"
+          >
+            <Copy className="w-3.5 h-3.5 text-[var(--accent)]" />
+            <span>Quick-Copy</span>
+          </button>
+        </div>
+
+        {/* Right Actions: Quick Actions, Country Pack, Notification Bell, Theme Toggle, User Avatar */}
+        <div className="flex items-center gap-2 sm:gap-3">
+          {/* Quick Actions Dropdown */}
+          <div className="relative" ref={quickActionsRef}>
+            <button
+              onClick={() => setIsQuickActionOpen(!isQuickActionOpen)}
+              className="hidden sm:flex items-center gap-1.5 px-3.5 h-[42px] rounded-xl bg-[var(--accent)] text-white text-xs font-medium hover:bg-[var(--accent-hover)] transition-all shadow-xs cursor-pointer active:scale-[0.98]"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Create</span>
+              <ChevronDown className="w-3 h-3 opacity-80 ml-0.5" />
+            </button>
+
+            {isQuickActionOpen && (
+              <div className="absolute right-0 mt-2 w-48 rounded-2xl bg-[var(--bg-surface)] border border-[var(--border-strong)] modal-shadow py-2 z-50 animate-in fade-in zoom-in-95 duration-150">
+                <button
+                  onClick={() => {
+                    setIsQuickActionOpen(false);
+                    navigate('/leases');
+                  }}
+                  className="w-full px-4 py-2 text-left text-xs text-[var(--text-primary)] hover:bg-[var(--bg-base)] flex items-center gap-2.5 cursor-pointer"
+                >
+                  <FileText className="w-3.5 h-3.5 text-[var(--accent)]" />
+                  <span>New Lease</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setIsQuickActionOpen(false);
+                    navigate('/properties');
+                  }}
+                  className="w-full px-4 py-2 text-left text-xs text-[var(--text-primary)] hover:bg-[var(--bg-base)] flex items-center gap-2.5 cursor-pointer"
+                >
+                  <Building2 className="w-3.5 h-3.5 text-[var(--accent)]" />
+                  <span>Add Property / Unit</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setIsQuickActionOpen(false);
+                    navigate('/invoices');
+                  }}
+                  className="w-full px-4 py-2 text-left text-xs text-[var(--text-primary)] hover:bg-[var(--bg-base)] flex items-center gap-2.5 cursor-pointer"
+                >
+                  <Receipt className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Record Payment</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setIsQuickActionOpen(false);
+                    navigate('/maintenance');
+                  }}
+                  className="w-full px-4 py-2 text-left text-xs text-[var(--text-primary)] hover:bg-[var(--bg-base)] flex items-center gap-2.5 cursor-pointer"
+                >
+                  <Wrench className="w-3.5 h-3.5 text-amber-600" />
+                  <span>Log Maintenance</span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Global Country Pack Selector */}
+          <div className="flex items-center gap-1.5 px-3 h-[42px] rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] text-xs font-semibold text-[var(--text-primary)]">
+            <Globe className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
+            <select
+              value={countryCode}
+              onChange={(e) => handlePackChange(e.target.value)}
+              className="bg-transparent border-0 focus:outline-none cursor-pointer font-semibold text-xs text-[var(--text-primary)]"
+            >
+              {packs.map((p) => (
+                <option key={p.code} value={p.code} className="bg-[var(--bg-surface)] text-[var(--text-primary)]">
+                  {p.flag} {p.currency.code} ({p.code})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Notifications Alert Bell & Popover */}
+          <div className="relative" ref={notificationsRef}>
+            <button
+              onClick={() => setIsNotificationsOpen(!isNotificationsOpen)}
+              className="w-9 h-9 rounded-full flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-base)] transition-colors focus-ring cursor-pointer relative"
+              title="System Alerts & Deadlines"
+            >
+              <Bell className="w-4 h-4" />
+              {totalAlertsCount > 0 && (
+                <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-amber-500 ring-2 ring-[var(--bg-surface)]" />
+              )}
+            </button>
+
+            {isNotificationsOpen && (
+              <div className="absolute right-0 mt-2 w-80 sm:w-96 rounded-2xl bg-[var(--bg-surface)] border border-[var(--border-strong)] modal-shadow overflow-hidden z-50 animate-in fade-in zoom-in-95 duration-150">
+                <div className="p-4 border-b border-[var(--border-subtle)] flex items-center justify-between bg-[var(--bg-base)]">
+                  <div>
+                    <h4 className="text-xs font-bold text-[var(--text-primary)] uppercase tracking-wider">
+                      Portfolio Alerts
+                    </h4>
+                    <p className="text-[11px] text-[var(--text-secondary)]">
+                      {totalAlertsCount} urgent matters requiring attention
+                    </p>
+                  </div>
+                  <span className="px-2 py-0.5 rounded-full bg-[var(--accent-subtle)] text-[var(--accent)] text-[10px] font-bold">
+                    {totalAlertsCount}
+                  </span>
+                </div>
+
+                <div className="max-h-80 overflow-y-auto divide-y divide-[var(--border-subtle)]">
+                  {totalAlertsCount === 0 ? (
+                    <div className="p-6 text-center text-xs text-[var(--text-secondary)]">
+                      No active alerts! Leases and maintenance are up to date.
+                    </div>
+                  ) : (
+                    <>
+                      {/* Expiring Leases */}
+                      {expiringLeases.map((l) => {
+                        const tenant = tenants.find((t) => t.id === l.tenant_id);
+                        const unit = units.find((u) => u.id === l.unit_id);
+                        const label = formatLeaseName(tenant?.name, unit?.name, l.id);
+
+                        return (
+                          <div
+                            key={l.id}
+                            onClick={() => {
+                              setIsNotificationsOpen(false);
+                              navigate('/leases');
+                            }}
+                            className="p-3.5 hover:bg-[var(--bg-base)] transition-colors cursor-pointer flex items-start gap-3"
+                          >
+                            <div className="w-8 h-8 rounded-full bg-amber-500/10 text-amber-600 flex items-center justify-center shrink-0 mt-0.5">
+                              <Clock className="w-4 h-4" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between">
+                                <span className="text-xs font-semibold text-[var(--text-primary)] truncate">
+                                  Lease Expiring Soon
+                                </span>
+                                <span className="text-[10px] text-amber-600 font-medium">Due {l.end_date}</span>
+                              </div>
+                              <p className="text-[11px] text-[var(--text-secondary)] truncate mt-0.5">{label}</p>
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                      {/* Pending Maintenance */}
+                      {pendingMaintenance.map((m) => {
+                        const unit = units.find((u) => u.id === m.unit_id);
+
+                        return (
+                          <div
+                            key={m.id}
+                            onClick={() => {
+                              setIsNotificationsOpen(false);
+                              navigate('/maintenance');
+                            }}
+                            className="p-3.5 hover:bg-[var(--bg-base)] transition-colors cursor-pointer flex items-start gap-3"
+                          >
+                            <div className="w-8 h-8 rounded-full bg-rose-500/10 text-rose-600 flex items-center justify-center shrink-0 mt-0.5">
+                              <Wrench className="w-4 h-4" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between">
+                                <span className="text-xs font-semibold text-[var(--text-primary)] truncate">
+                                  {m.category} Maintenance
+                                </span>
+                                <span className="text-[10px] font-bold text-rose-600 uppercase">{m.urgency}</span>
+                              </div>
+                              <p className="text-[11px] text-[var(--text-secondary)] truncate mt-0.5">
+                                {unit?.name || 'Unit'} &bull; {m.description}
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                      {/* Expiring Vault Documents */}
+                      {expiringDocuments.map((doc) => {
+                        return (
+                          <div
+                            key={doc.id}
+                            onClick={() => {
+                              setIsNotificationsOpen(false);
+                              navigate('/documents');
+                            }}
+                            className="p-3.5 hover:bg-[var(--bg-base)] transition-colors cursor-pointer flex items-start gap-3"
+                          >
+                            <div className="w-8 h-8 rounded-full bg-red-500/10 text-red-600 flex items-center justify-center shrink-0 mt-0.5">
+                              <FileText className="w-4 h-4" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between">
+                                <span className="text-xs font-semibold text-[var(--text-primary)] truncate">
+                                  Doc Expiring: {doc.title}
+                                </span>
+                                <span className="text-[10px] text-red-600 font-medium">Expires {doc.expiry_date}</span>
+                              </div>
+                              <p className="text-[11px] text-[var(--text-secondary)] truncate mt-0.5">
+                                Category: {doc.category.replace('_', ' ')}
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Theme Toggle */}
+          <button
+            onClick={onToggleTheme}
+            className="w-9 h-9 rounded-full flex items-center justify-center text-[var(--text-secondary)] hover:bg-[var(--bg-base)] hover:text-[var(--text-primary)] transition-colors focus-ring cursor-pointer"
+            title="Toggle color theme"
+          >
+            {isDarkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+          </button>
+
+          {/* Quiet Background Sync Indicator in Topbar */}
+          {user && (
+            <div
+              className="flex items-center gap-1.5 px-2 py-1 rounded-xl bg-[var(--bg-base)] border border-[var(--border-subtle)] text-[11px] transition-all"
+              title={
+                syncState === 'error'
+                  ? syncError || 'Cloud sync paused: Re-login required.'
+                  : lastSyncedAt
+                  ? `Last Synced: ${new Date(lastSyncedAt).toLocaleString()}`
+                  : 'Cloud Synced'
+              }
+            >
+              {(syncState === 'syncing' || syncState === 'pending') && (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-[var(--accent)]" />
+                  <span className="hidden sm:inline text-[var(--text-secondary)]">Syncing...</span>
+                </>
+              )}
+              {syncState === 'synced' || syncState === 'idle' ? (
+                <>
+                  <div className="relative flex items-center">
+                    <Cloud className="w-4 h-4 text-emerald-600" />
+                    <CheckCircle className="w-2.5 h-2.5 text-white fill-emerald-600 absolute -bottom-0.5 -right-0.5" />
+                  </div>
+                  <span className="hidden sm:inline text-[var(--text-secondary)]">Synced</span>
+                </>
+              ) : null}
+              {syncState === 'error' && (
+                <>
+                  <CloudOff className="w-4 h-4 text-rose-600" />
+                  <span className="hidden sm:inline text-rose-600 font-semibold">Sync Paused</span>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* User Profile / Circular Avatar */}
+          {user ? (
+            <div className="flex items-center gap-2 border-l border-[var(--border-subtle)] pl-2 sm:pl-3">
+              {user.picture ? (
+                <img
+                  src={user.picture}
+                  alt={user.name}
+                  className="w-9 h-9 rounded-full object-cover ring-1 ring-[var(--border-subtle)] shrink-0 shadow-xs"
+                />
+              ) : (
+                <div
+                  className="w-9 h-9 rounded-full bg-[var(--accent)] text-white text-xs font-bold flex items-center justify-center shrink-0 shadow-xs"
+                  title={user.name}
+                >
+                  {user.name[0]}
+                </div>
+              )}
+              <div className="hidden lg:flex flex-col text-left">
+                <span className="text-xs font-semibold text-[var(--text-primary)] line-clamp-1">{user.name}</span>
+                <span className="text-[10px] text-[var(--text-secondary)] line-clamp-1">{user.email}</span>
+              </div>
+              <button
+                onClick={handleSignOut}
+                className="w-8 h-8 rounded-full flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--status-danger-fg)] hover:bg-[var(--bg-base)] cursor-pointer"
+                title="Sign out of Google Drive"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </header>
+
+      <CommandPalette isOpen={isCommandOpen} onClose={() => setIsCommandOpen(false)} />
+      <QuickCopyPanel isOpen={isQuickCopyOpen} onClose={() => setIsQuickCopyOpen(false)} />
+    </>
+  );
+};
