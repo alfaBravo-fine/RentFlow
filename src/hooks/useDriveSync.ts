@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useAuthStore } from '../stores/authStore';
 import { db } from '../db/client';
-import { encryptWithGoogleId, decryptWithGoogleId } from '../lib/driveCrypto';
+import { encryptWithGoogleId } from '../lib/driveCrypto';
 import {
   findDriveBackupFile,
   uploadEncryptedBackupToDrive,
-  downloadEncryptedBackupFromDrive,
+  syncOnStartup,
 } from '../lib/googleDriveService';
-import { Property, Tenant } from '../db/schema';
+import { isTauri, tauriDrivePushBackup, tauriDrivePullBackup } from '../lib/tauri/bridge';
 
 export type SyncState = 'idle' | 'pending' | 'syncing' | 'synced' | 'error';
 
@@ -18,18 +18,23 @@ export function useDriveSync() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
 
   const [syncState, setSyncState] = useState<SyncState>('idle');
+  const [isRestoring, setIsRestoring] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(() => {
     return localStorage.getItem('rentflow_last_drive_sync') || null;
   });
   const [syncError, setSyncError] = useState<string | null>(null);
 
-  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isSyncingRef = useRef(false);
+  const hasQueuedSyncRef = useRef(false);
 
   // Perform upload to Google Drive appdata (AES-256-GCM encrypted)
   const triggerUpload = useCallback(async () => {
-    if (!user || !accessToken || isSyncingRef.current) {
-      console.warn('[useDriveSync] Skipped triggerUpload because missing user/accessToken or already syncing.');
+    if (!user || !accessToken) {
+      return;
+    }
+
+    if (isSyncingRef.current) {
+      hasQueuedSyncRef.current = true;
       return;
     }
 
@@ -38,112 +43,137 @@ export function useDriveSync() {
       setSyncState('syncing');
       setSyncError(null);
 
-      console.log('[useDriveSync] Starting immediate database backup to Google Drive...');
+      if (isTauri()) {
+        // Execute Google Drive sync push entirely in Rust backend using reqwest
+        const result = await tauriDrivePushBackup(user.sub);
+        setSyncState('synced');
+        setLastSyncedAt(result.synced_at);
+        localStorage.setItem('rentflow_last_drive_sync', result.synced_at);
+        if (result.file_id) {
+          localStorage.setItem('rentflow_google_drive_file_id', result.file_id);
+        }
+      } else {
+        // Web mode: client-side multipart upload
+        const snapshot = db.exportAllData();
+        const payload = {
+          app: 'RentFlow',
+          version: '2.0.0',
+          exportedAt: new Date().toISOString(),
+          userId: user.sub,
+          userEmail: user.email,
+          data: snapshot,
+        };
 
-      // 1. Export local database snapshot
-      const snapshot = db.exportAllData();
-      const payload = {
-        app: 'RentFlow',
-        version: '2.0.0',
-        exportedAt: new Date().toISOString(),
-        userId: user.sub,
-        userEmail: user.email,
-        data: snapshot,
-      };
+        const encryptedBytes = await encryptWithGoogleId(JSON.stringify(payload), user.sub);
 
-      // 2. Encrypt using AES-256-GCM with key derived from user.sub
-      const encryptedBytes = await encryptWithGoogleId(JSON.stringify(payload), user.sub);
+        let targetFileId = driveFileId;
+        if (!targetFileId) {
+          targetFileId = await findDriveBackupFile(accessToken);
+        }
 
-      // 3. Search for file ID if missing
-      let targetFileId = driveFileId;
-      if (!targetFileId) {
-        targetFileId = await findDriveBackupFile(accessToken);
+        const result = await uploadEncryptedBackupToDrive(accessToken, targetFileId, encryptedBytes);
+
+        setSyncState('synced');
+        setLastSyncedAt(result.syncedAt);
+        localStorage.setItem('rentflow_last_drive_sync', result.syncedAt);
+        if (result.fileId) {
+          localStorage.setItem('rentflow_google_drive_file_id', result.fileId);
+        }
       }
-
-      // 4. Perform multipart upload to Google Drive REST API
-      const result = await uploadEncryptedBackupToDrive(accessToken, targetFileId, encryptedBytes);
-
-      setSyncState('synced');
-      setLastSyncedAt(result.syncedAt);
-      localStorage.setItem('rentflow_last_drive_sync', result.syncedAt);
-      if (result.fileId) {
-        localStorage.setItem('rentflow_google_drive_file_id', result.fileId);
-      }
-      console.log('[useDriveSync] Force Sync Upload Completed Successfully!');
     } catch (err: any) {
-      console.error('[useDriveSync] Drive upload error:', err);
+      console.warn('[useDriveSync] Drive upload error:', err);
       setSyncState('error');
       setSyncError(err.message || 'Auto-sync upload failed');
     } finally {
       isSyncingRef.current = false;
+      if (hasQueuedSyncRef.current) {
+        hasQueuedSyncRef.current = false;
+        triggerUpload();
+      }
     }
   }, [user, accessToken, driveFileId]);
 
-  // 1. App Startup: Download & decrypt backup if local DB is empty
+  // 1. Startup Pull / Cross-Device Restore: Download & decrypt backup if remote is newer or local is empty
   useEffect(() => {
-    if (!isAuthenticated || !user || !accessToken) return;
+    if (!isAuthenticated || !user) return;
 
-    const checkAndRestoreOnStartup = async () => {
-      const properties = db.getTable<Property>('properties');
-      const tenants = db.getTable<Tenant>('tenants');
+    let isMounted = true;
+    const runStartupSync = async () => {
+      try {
+        setIsRestoring(true);
+        setSyncState('syncing');
 
-      // Only download on startup if local DB is empty
-      if (properties.length === 0 && tenants.length === 0) {
-        try {
-          setSyncState('syncing');
-          let targetFileId = driveFileId;
-          if (!targetFileId) {
-            targetFileId = await findDriveBackupFile(accessToken);
-          }
+        if (isTauri()) {
+          // Pull and restore in Rust backend
+          const result = await tauriDrivePullBackup(user.sub);
+          if (!isMounted) return;
 
-          if (targetFileId) {
-            const encryptedBytes = await downloadEncryptedBackupFromDrive(accessToken, targetFileId);
-            if (encryptedBytes && encryptedBytes.length >= 12) {
-              const decryptedJson = await decryptWithGoogleId(encryptedBytes, user.sub);
-              const parsed = JSON.parse(decryptedJson);
-              if (parsed.data) {
-                db.importAllData(parsed.data);
-                setSyncState('synced');
-                setLastSyncedAt(new Date().toISOString());
-                console.log('Successfully restored cloud backup from Google Drive appDataFolder.');
-              }
-            } else {
-              setSyncState('idle');
-            }
+          if (result.restored) {
+            setSyncState('synced');
+            const syncedTime = localStorage.getItem('rentflow_last_drive_sync') || new Date().toISOString();
+            setLastSyncedAt(syncedTime);
           } else {
             setSyncState('idle');
           }
-        } catch (err: any) {
-          console.warn('Could not restore startup backup from Drive:', err);
+        } else if (accessToken) {
+          const result = await syncOnStartup(accessToken, user.sub);
+          if (!isMounted) return;
+
+          if (result.restored) {
+            setSyncState('synced');
+            const syncedTime = localStorage.getItem('rentflow_last_drive_sync') || new Date().toISOString();
+            setLastSyncedAt(syncedTime);
+          } else {
+            setSyncState('idle');
+          }
+        }
+      } catch (err: any) {
+        console.warn('[useDriveSync] Startup sync warning:', err);
+        if (isMounted) {
           setSyncState('idle');
+        }
+      } finally {
+        if (isMounted) {
+          setIsRestoring(false);
         }
       }
     };
 
-    checkAndRestoreOnStartup();
-  }, [isAuthenticated, user, accessToken, driveFileId]);
+    runStartupSync();
 
-  // 2. Debounced 5-second automatic sync trigger on DB write
+    return () => {
+      isMounted = false;
+    };
+  }, [isAuthenticated, user, accessToken]);
+
+  // 2. Zero-delay instant sync on DB write (no 5-second debounce)
   useEffect(() => {
     if (!isAuthenticated || !user || !accessToken) return;
 
     const unsubscribe = db.onWrite(() => {
-      setSyncState('pending');
-
-      if (debounceTimerRef.current) {
-        clearTimeout(debounceTimerRef.current);
-      }
-
-      debounceTimerRef.current = setTimeout(() => {
-        triggerUpload();
-      }, 5000);
+      // Instant synchronization: Zero debounce delay
+      triggerUpload();
     });
 
     return () => {
       unsubscribe();
-      if (debounceTimerRef.current) {
-        clearTimeout(debounceTimerRef.current);
+    };
+  }, [isAuthenticated, user, accessToken, triggerUpload]);
+
+  // 3. Instant sync on tab close / beforeunload
+  useEffect(() => {
+    if (!isAuthenticated || !user || !accessToken) return;
+
+    const handleBeforeUnload = () => {
+      if (!isSyncingRef.current) {
+        // Attempt quick sync trigger
+        triggerUpload();
       }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
     };
   }, [isAuthenticated, user, accessToken, triggerUpload]);
 
@@ -151,6 +181,7 @@ export function useDriveSync() {
     syncState,
     lastSyncedAt,
     syncError,
+    isRestoring,
     syncNow: triggerUpload,
   };
 }

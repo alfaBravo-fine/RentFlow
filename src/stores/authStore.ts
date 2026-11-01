@@ -1,4 +1,6 @@
 import { create } from 'zustand';
+import { GOOGLE_CLIENT_ID } from '../config/google';
+import { requestFreshAccessToken } from '../lib/googleDriveService';
 
 export interface UserProfile {
   sub: string;
@@ -16,34 +18,32 @@ export interface AuthState {
   authError: string | null;
   setAuthenticating: (isAuthenticating: boolean, error?: string | null) => void;
   setGoogleSession: (user: UserProfile, accessToken: string, driveFileId: string) => void;
+  setAccessToken: (accessToken: string) => void;
+  refreshAccessTokenSilently: () => Promise<string | null>;
   signOut: () => Promise<void>;
   checkAuth: () => void;
 }
 
-const STORAGE_USER_KEY = 'rentflow_google_user';
+const STORAGE_USER_KEY_1 = 'rentflow_user';
+const STORAGE_USER_KEY_2 = 'rentflow_google_user';
 const STORAGE_TOKEN_KEY = 'rentflow_google_access_token';
 const STORAGE_DRIVE_FILE_ID_KEY = 'rentflow_google_drive_file_id';
 
+function getStoredProfile(): UserProfile | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_USER_KEY_1) || localStorage.getItem(STORAGE_USER_KEY_2);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
 export const useAuthStore = create<AuthState>((set, get) => ({
-  user: (() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_USER_KEY);
-      return raw ? JSON.parse(raw) : null;
-    } catch {
-      return null;
-    }
-  })(),
+  user: getStoredProfile(),
   accessToken: localStorage.getItem(STORAGE_TOKEN_KEY) || null,
   driveFileId: localStorage.getItem(STORAGE_DRIVE_FILE_ID_KEY) || null,
-  isAuthenticated: (() => {
-    try {
-      const userRaw = localStorage.getItem(STORAGE_USER_KEY);
-      const token = localStorage.getItem(STORAGE_TOKEN_KEY);
-      return !!(userRaw && token);
-    } catch {
-      return false;
-    }
-  })(),
+  // Persistent login: If user profile exists in localStorage, immediately set to logged in!
+  isAuthenticated: !!getStoredProfile(),
   isAuthenticating: false,
   authError: null,
 
@@ -52,18 +52,44 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   setGoogleSession: (user: UserProfile, accessToken: string, driveFileId: string) => {
-    localStorage.setItem(STORAGE_USER_KEY, JSON.stringify(user));
+    const userJson = JSON.stringify(user);
+    localStorage.setItem(STORAGE_USER_KEY_1, userJson);
+    localStorage.setItem(STORAGE_USER_KEY_2, userJson);
     localStorage.setItem(STORAGE_TOKEN_KEY, accessToken);
-    localStorage.setItem(STORAGE_DRIVE_FILE_ID_KEY, driveFileId);
+    if (driveFileId) {
+      localStorage.setItem(STORAGE_DRIVE_FILE_ID_KEY, driveFileId);
+    }
 
     set({
       user,
       accessToken,
-      driveFileId,
+      driveFileId: driveFileId || get().driveFileId,
       isAuthenticated: true,
       isAuthenticating: false,
       authError: null,
     });
+  },
+
+  setAccessToken: (accessToken: string) => {
+    localStorage.setItem(STORAGE_TOKEN_KEY, accessToken);
+    set({ accessToken });
+  },
+
+  refreshAccessTokenSilently: async () => {
+    try {
+      const freshToken = await requestFreshAccessToken(
+        GOOGLE_CLIENT_ID,
+        'openid email profile https://www.googleapis.com/auth/drive.appdata'
+      );
+      if (freshToken) {
+        localStorage.setItem(STORAGE_TOKEN_KEY, freshToken);
+        set({ accessToken: freshToken });
+        return freshToken;
+      }
+    } catch (err) {
+      console.warn('[AuthStore] Silent token refresh failed:', err);
+    }
+    return null;
   },
 
   signOut: async () => {
@@ -80,7 +106,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       }
     }
 
-    localStorage.removeItem(STORAGE_USER_KEY);
+    localStorage.removeItem(STORAGE_USER_KEY_1);
+    localStorage.removeItem(STORAGE_USER_KEY_2);
     localStorage.removeItem(STORAGE_TOKEN_KEY);
     localStorage.removeItem(STORAGE_DRIVE_FILE_ID_KEY);
 
@@ -95,27 +122,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   checkAuth: () => {
-    try {
-      const userRaw = localStorage.getItem(STORAGE_USER_KEY);
-      const token = localStorage.getItem(STORAGE_TOKEN_KEY);
-      const fileId = localStorage.getItem(STORAGE_DRIVE_FILE_ID_KEY);
+    const profile = getStoredProfile();
+    const token = localStorage.getItem(STORAGE_TOKEN_KEY);
+    const fileId = localStorage.getItem(STORAGE_DRIVE_FILE_ID_KEY);
 
-      if (userRaw && token) {
-        set({
-          user: JSON.parse(userRaw),
-          accessToken: token,
-          driveFileId: fileId,
-          isAuthenticated: true,
-        });
-      } else {
-        set({
-          user: null,
-          accessToken: null,
-          driveFileId: null,
-          isAuthenticated: false,
-        });
-      }
-    } catch {
+    if (profile) {
+      set({
+        user: profile,
+        accessToken: token || null,
+        driveFileId: fileId || null,
+        isAuthenticated: true,
+      });
+    } else {
       set({
         user: null,
         accessToken: null,

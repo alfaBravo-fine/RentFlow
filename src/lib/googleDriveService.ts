@@ -8,6 +8,7 @@ const APP_DATA_BACKUP_FILENAME = 'RentFlowBackup.enc';
 export interface DriveFileItem {
   id: string;
   name: string;
+  modifiedTime?: string;
 }
 
 export interface DriveFileListResponse {
@@ -49,16 +50,14 @@ export function requestFreshAccessToken(clientId: string, scope: string): Promis
 }
 
 /**
- * 1. Searches for existing RentFlowBackup.enc inside Google Drive appDataFolder.
- * Returns the Google Drive file ID if found, or null if not found.
+ * 1. Searches for existing RentFlowBackup.enc inside Google Drive appDataFolder with full metadata.
  */
-export async function findDriveBackupFile(accessToken: string): Promise<string | null> {
-  console.log('TOKEN (Search):', accessToken);
+export async function findDriveBackupFileItem(accessToken: string): Promise<DriveFileItem | null> {
   if (!accessToken || accessToken === 'undefined' || accessToken.startsWith('mock')) {
     return null;
   }
 
-  const queryUrl = `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name%3D%27${APP_DATA_BACKUP_FILENAME}%27%20and%20trashed%3Dfalse&fields=files(id%2Cname)`;
+  const queryUrl = `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name%3D%27${APP_DATA_BACKUP_FILENAME}%27%20and%20trashed%3Dfalse&fields=files(id%2Cname%2CmodifiedTime)`;
 
   try {
     const res = await fetch(queryUrl, {
@@ -69,7 +68,7 @@ export async function findDriveBackupFile(accessToken: string): Promise<string |
     });
 
     if (res.status === 401) {
-      console.warn('[Google Drive API] HTTP 401 Unauthorized - Token expired during search. Re-authenticating...');
+      console.warn('[Google Drive API] HTTP 401 Unauthorized - Attempting silent token refresh...');
       localStorage.removeItem('rentflow_google_access_token');
       try {
         const freshToken = await requestFreshAccessToken(
@@ -78,7 +77,7 @@ export async function findDriveBackupFile(accessToken: string): Promise<string |
         );
         if (freshToken) {
           localStorage.setItem('rentflow_google_access_token', freshToken);
-          return findDriveBackupFile(freshToken);
+          return findDriveBackupFileItem(freshToken);
         }
       } catch {
         console.warn('Cloud sync paused: Re-login required.');
@@ -93,12 +92,17 @@ export async function findDriveBackupFile(accessToken: string): Promise<string |
     const resText = await res.text();
     const data: DriveFileListResponse = JSON.parse(resText);
     if (data.files && data.files.length > 0) {
-      return data.files[0].id;
+      return data.files[0];
     }
   } catch (err) {
     console.error('[Google Drive API] Error searching appDataFolder:', err);
   }
   return null;
+}
+
+export async function findDriveBackupFile(accessToken: string): Promise<string | null> {
+  const item = await findDriveBackupFileItem(accessToken);
+  return item ? item.id : null;
 }
 
 /**
@@ -109,8 +113,6 @@ export async function uploadEncryptedBackupToDrive(
   existingFileId: string | null,
   encryptedBytes: Uint8Array
 ): Promise<{ fileId: string; syncedAt: string }> {
-  console.log('TOKEN:', accessToken);
-
   if (!accessToken || accessToken === 'undefined' || accessToken.startsWith('mock')) {
     throw new Error('Cloud sync paused: Invalid or missing Google access token.');
   }
@@ -144,7 +146,7 @@ export async function uploadEncryptedBackupToDrive(
   });
 
   if (res.status === 401) {
-    console.warn('[Google Drive Upload] 401 Unauthorized. Attempting token refresh...');
+    console.warn('[Google Drive Upload] 401 Unauthorized. Attempting silent token refresh...');
     localStorage.removeItem('rentflow_google_access_token');
     try {
       const freshToken = await requestFreshAccessToken(
@@ -153,7 +155,6 @@ export async function uploadEncryptedBackupToDrive(
       );
       if (freshToken) {
         localStorage.setItem('rentflow_google_access_token', freshToken);
-        console.log('TOKEN (Refreshed):', freshToken);
 
         const retryFormData = new FormData();
         if (existingFileId) {
@@ -177,9 +178,6 @@ export async function uploadEncryptedBackupToDrive(
   }
 
   const responseText = await res.text();
-  console.log('[Google Drive Upload] Status:', res.status, res.statusText);
-  console.log('[Google Drive Upload] Response:', responseText);
-
   if (!res.ok) {
     throw new Error(`Google Drive Upload Failed (HTTP ${res.status}): ${responseText}`);
   }
@@ -204,7 +202,6 @@ export async function downloadEncryptedBackupFromDrive(
   accessToken: string,
   fileId: string
 ): Promise<Uint8Array | null> {
-  console.log('TOKEN (Download):', accessToken);
   if (!accessToken || accessToken === 'undefined' || accessToken.startsWith('mock')) {
     return null;
   }
@@ -250,42 +247,54 @@ export async function downloadEncryptedBackupFromDrive(
 }
 
 /**
- * 4. Pulls and restores database backup from Google Drive appDataFolder if local DB is empty.
+ * 4. Cross-Device syncOnStartup: Checks appDataFolder for RentFlowBackup.enc.
+ * If file exists and local DB is empty OR remote modifiedTime is newer than local lastSyncTime,
+ * downloads, decrypts, and updates local database.
  */
+export async function syncOnStartup(
+  accessToken: string,
+  googleId: string
+): Promise<{ restored: boolean; message: string }> {
+  try {
+    const item = await findDriveBackupFileItem(accessToken);
+    if (!item) {
+      return { restored: false, message: 'No remote backup found' };
+    }
+
+    const localSyncTime = localStorage.getItem('rentflow_last_drive_sync');
+    const properties = db.getTable<Property>('properties');
+    const tenants = db.getTable<Tenant>('tenants');
+    const isLocalEmpty = properties.length === 0 && tenants.length === 0;
+
+    const isRemoteNewer = Boolean(
+      item.modifiedTime &&
+      localSyncTime &&
+      new Date(item.modifiedTime).getTime() > new Date(localSyncTime).getTime()
+    );
+
+    if (isLocalEmpty || isRemoteNewer) {
+      console.log('[syncOnStartup] Remote backup is newer or local DB is empty. Restoring...');
+      const encryptedBytes = await downloadEncryptedBackupFromDrive(accessToken, item.id);
+      if (encryptedBytes && encryptedBytes.length >= 12) {
+        const decryptedJson = await decryptWithGoogleId(encryptedBytes, googleId);
+        const parsed = JSON.parse(decryptedJson);
+        if (parsed && parsed.data) {
+          db.importAllData(parsed.data);
+          localStorage.setItem('rentflow_last_drive_sync', item.modifiedTime || new Date().toISOString());
+          localStorage.setItem('rentflow_google_drive_file_id', item.id);
+          return { restored: true, message: 'Restored from Google Drive' };
+        }
+      }
+    }
+
+    return { restored: false, message: 'Local database is current' };
+  } catch (err: any) {
+    console.warn('[syncOnStartup] Error:', err);
+    return { restored: false, message: err.message || 'Sync check failed' };
+  }
+}
+
 export async function pullFromGoogleDrive(accessToken: string, googleId: string): Promise<boolean> {
-  const properties = db.getTable<Property>('properties');
-  const tenants = db.getTable<Tenant>('tenants');
-
-  if (properties.length > 0 || tenants.length > 0) {
-    console.log('[Google Drive Pull] Local database is not empty. Skipping cloud restore.');
-    return false;
-  }
-
-  console.log('[Google Drive Pull] Local database is empty. Searching appDataFolder for RentFlowBackup.enc...');
-  const fileId = await findDriveBackupFile(accessToken);
-  if (!fileId) {
-    console.log('[Google Drive Pull] No backup file found in appDataFolder.');
-    return false;
-  }
-
-  console.log('[Google Drive Pull] Downloading encrypted backup file ID:', fileId);
-  const encryptedBytes = await downloadEncryptedBackupFromDrive(accessToken, fileId);
-  if (!encryptedBytes || encryptedBytes.length < 12) {
-    console.warn('[Google Drive Pull] Downloaded backup is empty or invalid.');
-    return false;
-  }
-
-  console.log('[Google Drive Pull] Decrypting backup using Google ID key...');
-  const decryptedJson = await decryptWithGoogleId(encryptedBytes, googleId);
-  const parsed = JSON.parse(decryptedJson);
-
-  if (parsed && parsed.data) {
-    console.log('[Google Drive Pull] Restoring local database from Google Drive backup...');
-    db.importAllData(parsed.data);
-    localStorage.setItem('rentflow_last_drive_sync', new Date().toISOString());
-    localStorage.setItem('rentflow_google_drive_file_id', fileId);
-    return true;
-  }
-
-  return false;
+  const result = await syncOnStartup(accessToken, googleId);
+  return result.restored;
 }

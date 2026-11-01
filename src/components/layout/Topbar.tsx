@@ -1,10 +1,9 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Search,
   Sun,
   Moon,
-  LogIn,
   LogOut,
   RefreshCw,
   Copy,
@@ -13,7 +12,6 @@ import {
   Bell,
   Clock,
   Wrench,
-  AlertCircle,
   Plus,
   FileText,
   Building2,
@@ -21,12 +19,10 @@ import {
   X,
   ChevronDown,
   CheckCircle,
-  Database,
+  Check,
   Cloud,
   CloudOff,
 } from '../icons';
-import { getStoredUser, signOutGoogle, GoogleUser } from '../../lib/google/auth';
-import { syncEngine } from '../../lib/sync';
 import { listAllPacks, getCountryPack } from '../../countries/resolver';
 import { usePackStore } from '../../countries/usePack';
 import { useAuthStore } from '../../stores/authStore';
@@ -59,10 +55,52 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme, onOpe
   const countryCode = usePackStore((s) => s.countryCode);
   const setCountryCode = usePackStore((s) => s.setCountryCode);
   const { showToast } = useToast();
-  const { syncState, lastSyncedAt, syncError } = useDriveSync();
+  const { syncState, lastSyncedAt, syncError, isRestoring } = useDriveSync();
 
-  const pendingSyncs = syncEngine.getPendingCount();
   const packs = listAllPacks();
+
+  // Notification read & dismissal state persisted in localStorage
+  const [notificationsState, setNotificationsState] = useState<Record<string, { read?: boolean; dismissed?: boolean }>>(() => {
+    try {
+      const raw = localStorage.getItem('rentflow_notifications_state');
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const saveNotificationsState = useCallback((updated: Record<string, { read?: boolean; dismissed?: boolean }>) => {
+    setNotificationsState(updated);
+    try {
+      localStorage.setItem('rentflow_notifications_state', JSON.stringify(updated));
+    } catch (e) {
+      console.warn('Error saving notifications state:', e);
+    }
+  }, []);
+
+  const handleMarkAsRead = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    saveNotificationsState({
+      ...notificationsState,
+      [id]: { ...notificationsState[id], read: true },
+    });
+  };
+
+  const handleRemoveNotification = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    saveNotificationsState({
+      ...notificationsState,
+      [id]: { ...notificationsState[id], dismissed: true },
+    });
+  };
+
+  const handleMarkAllRead = () => {
+    const updated = { ...notificationsState };
+    allAlertIds.forEach((id) => {
+      updated[id] = { ...updated[id], read: true };
+    });
+    saveNotificationsState(updated);
+  };
 
   // Close popovers on click outside
   useEffect(() => {
@@ -78,6 +116,14 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme, onOpe
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // Reactive DB subscription for active notifications
+  const [dbTick, setDbTick] = useState(0);
+  useEffect(() => {
+    return db.onWrite(() => {
+      setDbTick((prev) => prev + 1);
+    });
+  }, []);
+
   // Compute Active Alerts
   const leases = db.getTable<Lease>('leases');
   const tenants = db.getTable<Tenant>('tenants');
@@ -89,25 +135,38 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme, onOpe
   const sixtyDaysMs = 60 * 24 * 60 * 60 * 1000;
   const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
 
-  const expiringLeases = leases.filter((l) => {
+  const rawExpiringLeases = leases.filter((l) => {
     if (l.status === 'expired' || l.status === 'terminated') return false;
     const endMs = new Date(l.end_date).getTime();
     const diff = endMs - now;
-    return diff <= sixtyDaysMs; // Within 60 days or already overdue
+    return diff <= sixtyDaysMs;
   });
 
-  const pendingMaintenance = maintenance.filter(
+  const rawPendingMaintenance = maintenance.filter(
     (m) => m.status !== 'completed' && m.status !== 'closed'
   );
 
-  const expiringDocuments = documents.filter((d) => {
+  const rawExpiringDocuments = documents.filter((d) => {
     if (d.deleted_at || !d.expiry_date) return false;
     const expMs = new Date(d.expiry_date).getTime();
     const diff = expMs - now;
     return diff <= thirtyDaysMs;
   });
 
-  const totalAlertsCount = expiringLeases.length + pendingMaintenance.length + expiringDocuments.length;
+  // Filter out dismissed notifications
+  const activeExpiringLeases = rawExpiringLeases.filter((l) => !notificationsState[`lease-${l.id}`]?.dismissed);
+  const activePendingMaintenance = rawPendingMaintenance.filter((m) => !notificationsState[`maint-${m.id}`]?.dismissed);
+  const activeExpiringDocuments = rawExpiringDocuments.filter((d) => !notificationsState[`doc-${d.id}`]?.dismissed);
+
+  const allAlertIds = [
+    ...activeExpiringLeases.map((l) => `lease-${l.id}`),
+    ...activePendingMaintenance.map((m) => `maint-${m.id}`),
+    ...activeExpiringDocuments.map((d) => `doc-${d.id}`),
+  ];
+
+  // Badge count must only reflect unread, non-dismissed alerts
+  const unreadAlertsCount = allAlertIds.filter((id) => !notificationsState[id]?.read).length;
+  const totalVisibleAlerts = activeExpiringLeases.length + activePendingMaintenance.length + activeExpiringDocuments.length;
 
   const handlePackChange = (code: string) => {
     setCountryCode(code);
@@ -117,8 +176,6 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme, onOpe
       message: `Switched region to ${p.name} (${p.currency.code})`,
     });
   };
-
-
 
   const handleSignOut = async () => {
     await signOut();
@@ -247,7 +304,7 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme, onOpe
               title="System Alerts & Deadlines"
             >
               <Bell className="w-4 h-4" />
-              {totalAlertsCount > 0 && (
+              {unreadAlertsCount > 0 && (
                 <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-amber-500 ring-2 ring-[var(--bg-surface)]" />
               )}
             </button>
@@ -260,23 +317,35 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme, onOpe
                       Portfolio Alerts
                     </h4>
                     <p className="text-[11px] text-[var(--text-secondary)]">
-                      {totalAlertsCount} urgent matters requiring attention
+                      {unreadAlertsCount} unread matter{unreadAlertsCount === 1 ? '' : 's'}
                     </p>
                   </div>
-                  <span className="px-2 py-0.5 rounded-full bg-[var(--accent-subtle)] text-[var(--accent)] text-[10px] font-bold">
-                    {totalAlertsCount}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    {unreadAlertsCount > 0 && (
+                      <button
+                        onClick={handleMarkAllRead}
+                        className="text-[10px] text-[var(--accent)] hover:underline font-semibold cursor-pointer"
+                      >
+                        Mark all read
+                      </button>
+                    )}
+                    <span className="px-2 py-0.5 rounded-full bg-[var(--accent-subtle)] text-[var(--accent)] text-[10px] font-bold">
+                      {unreadAlertsCount}
+                    </span>
+                  </div>
                 </div>
 
                 <div className="max-h-80 overflow-y-auto divide-y divide-[var(--border-subtle)]">
-                  {totalAlertsCount === 0 ? (
+                  {totalVisibleAlerts === 0 ? (
                     <div className="p-6 text-center text-xs text-[var(--text-secondary)]">
                       No active alerts! Leases and maintenance are up to date.
                     </div>
                   ) : (
                     <>
                       {/* Expiring Leases */}
-                      {expiringLeases.map((l) => {
+                      {activeExpiringLeases.map((l) => {
+                        const alertId = `lease-${l.id}`;
+                        const isRead = !!notificationsState[alertId]?.read;
                         const tenant = tenants.find((t) => t.id === l.tenant_id);
                         const unit = units.find((u) => u.id === l.unit_id);
                         const label = formatLeaseName(tenant?.name, unit?.name, l.id);
@@ -285,10 +354,16 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme, onOpe
                           <div
                             key={l.id}
                             onClick={() => {
+                              saveNotificationsState({
+                                ...notificationsState,
+                                [alertId]: { ...notificationsState[alertId], read: true },
+                              });
                               setIsNotificationsOpen(false);
                               navigate('/leases');
                             }}
-                            className="p-3.5 hover:bg-[var(--bg-base)] transition-colors cursor-pointer flex items-start gap-3"
+                            className={`p-3.5 hover:bg-[var(--bg-base)] transition-colors cursor-pointer flex items-start gap-3 ${
+                              isRead ? 'opacity-65' : ''
+                            }`}
                           >
                             <div className="w-8 h-8 rounded-full bg-amber-500/10 text-amber-600 flex items-center justify-center shrink-0 mt-0.5">
                               <Clock className="w-4 h-4" />
@@ -302,22 +377,49 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme, onOpe
                               </div>
                               <p className="text-[11px] text-[var(--text-secondary)] truncate mt-0.5">{label}</p>
                             </div>
+                            {/* Action Buttons: Mark as Read & Dismiss (X) */}
+                            <div className="flex items-center gap-1 shrink-0 pt-0.5">
+                              {!isRead && (
+                                <button
+                                  onClick={(e) => handleMarkAsRead(alertId, e)}
+                                  className="w-6 h-6 rounded flex items-center justify-center text-[var(--text-secondary)] hover:text-emerald-600 hover:bg-emerald-500/10 transition-colors"
+                                  title="Mark as Read"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                              <button
+                                onClick={(e) => handleRemoveNotification(alertId, e)}
+                                className="w-6 h-6 rounded flex items-center justify-center text-[var(--text-secondary)] hover:text-rose-600 hover:bg-rose-500/10 transition-colors"
+                                title="Remove Notification"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
                           </div>
                         );
                       })}
 
                       {/* Pending Maintenance */}
-                      {pendingMaintenance.map((m) => {
+                      {activePendingMaintenance.map((m) => {
+                        const alertId = `maint-${m.id}`;
+                        const isRead = !!notificationsState[alertId]?.read;
                         const unit = units.find((u) => u.id === m.unit_id);
 
                         return (
                           <div
                             key={m.id}
                             onClick={() => {
+                              saveNotificationsState({
+                                ...notificationsState,
+                                [alertId]: { ...notificationsState[alertId], read: true },
+                              });
                               setIsNotificationsOpen(false);
                               navigate('/maintenance');
                             }}
-                            className="p-3.5 hover:bg-[var(--bg-base)] transition-colors cursor-pointer flex items-start gap-3"
+                            className={`p-3.5 hover:bg-[var(--bg-base)] transition-colors cursor-pointer flex items-start gap-3 ${
+                              isRead ? 'opacity-65' : ''
+                            }`}
                           >
                             <div className="w-8 h-8 rounded-full bg-rose-500/10 text-rose-600 flex items-center justify-center shrink-0 mt-0.5">
                               <Wrench className="w-4 h-4" />
@@ -333,20 +435,48 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme, onOpe
                                 {unit?.name || 'Unit'} &bull; {m.description}
                               </p>
                             </div>
+                            {/* Action Buttons: Mark as Read & Dismiss (X) */}
+                            <div className="flex items-center gap-1 shrink-0 pt-0.5">
+                              {!isRead && (
+                                <button
+                                  onClick={(e) => handleMarkAsRead(alertId, e)}
+                                  className="w-6 h-6 rounded flex items-center justify-center text-[var(--text-secondary)] hover:text-emerald-600 hover:bg-emerald-500/10 transition-colors"
+                                  title="Mark as Read"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                              <button
+                                onClick={(e) => handleRemoveNotification(alertId, e)}
+                                className="w-6 h-6 rounded flex items-center justify-center text-[var(--text-secondary)] hover:text-rose-600 hover:bg-rose-500/10 transition-colors"
+                                title="Remove Notification"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
                           </div>
                         );
                       })}
 
                       {/* Expiring Vault Documents */}
-                      {expiringDocuments.map((doc) => {
+                      {activeExpiringDocuments.map((doc) => {
+                        const alertId = `doc-${doc.id}`;
+                        const isRead = !!notificationsState[alertId]?.read;
+
                         return (
                           <div
                             key={doc.id}
                             onClick={() => {
+                              saveNotificationsState({
+                                ...notificationsState,
+                                [alertId]: { ...notificationsState[alertId], read: true },
+                              });
                               setIsNotificationsOpen(false);
                               navigate('/documents');
                             }}
-                            className="p-3.5 hover:bg-[var(--bg-base)] transition-colors cursor-pointer flex items-start gap-3"
+                            className={`p-3.5 hover:bg-[var(--bg-base)] transition-colors cursor-pointer flex items-start gap-3 ${
+                              isRead ? 'opacity-65' : ''
+                            }`}
                           >
                             <div className="w-8 h-8 rounded-full bg-red-500/10 text-red-600 flex items-center justify-center shrink-0 mt-0.5">
                               <FileText className="w-4 h-4" />
@@ -361,6 +491,25 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme, onOpe
                               <p className="text-[11px] text-[var(--text-secondary)] truncate mt-0.5">
                                 Category: {doc.category.replace('_', ' ')}
                               </p>
+                            </div>
+                            {/* Action Buttons: Mark as Read & Dismiss (X) */}
+                            <div className="flex items-center gap-1 shrink-0 pt-0.5">
+                              {!isRead && (
+                                <button
+                                  onClick={(e) => handleMarkAsRead(alertId, e)}
+                                  className="w-6 h-6 rounded flex items-center justify-center text-[var(--text-secondary)] hover:text-emerald-600 hover:bg-emerald-500/10 transition-colors"
+                                  title="Mark as Read"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                              <button
+                                onClick={(e) => handleRemoveNotification(alertId, e)}
+                                className="w-6 h-6 rounded flex items-center justify-center text-[var(--text-secondary)] hover:text-rose-600 hover:bg-rose-500/10 transition-colors"
+                                title="Remove Notification"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
                             </div>
                           </div>
                         );
@@ -386,20 +535,26 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme, onOpe
             <div
               className="flex items-center gap-1.5 px-2 py-1 rounded-xl bg-[var(--bg-base)] border border-[var(--border-subtle)] text-[11px] transition-all"
               title={
-                syncState === 'error'
+                isRestoring
+                  ? 'Restoring database from Google Drive...'
+                  : syncState === 'error'
                   ? syncError || 'Cloud sync paused: Re-login required.'
                   : lastSyncedAt
                   ? `Last Synced: ${new Date(lastSyncedAt).toLocaleString()}`
                   : 'Cloud Synced'
               }
             >
-              {(syncState === 'syncing' || syncState === 'pending') && (
+              {isRestoring ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-[var(--accent)]" />
+                  <span className="hidden sm:inline text-[var(--text-secondary)] font-medium">Restoring...</span>
+                </>
+              ) : syncState === 'syncing' || syncState === 'pending' ? (
                 <>
                   <RefreshCw className="w-3.5 h-3.5 animate-spin text-[var(--accent)]" />
                   <span className="hidden sm:inline text-[var(--text-secondary)]">Syncing...</span>
                 </>
-              )}
-              {syncState === 'synced' || syncState === 'idle' ? (
+              ) : syncState === 'synced' || syncState === 'idle' ? (
                 <>
                   <div className="relative flex items-center">
                     <Cloud className="w-4 h-4 text-emerald-600" />
@@ -407,13 +562,12 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme, onOpe
                   </div>
                   <span className="hidden sm:inline text-[var(--text-secondary)]">Synced</span>
                 </>
-              ) : null}
-              {syncState === 'error' && (
+              ) : syncState === 'error' ? (
                 <>
                   <CloudOff className="w-4 h-4 text-rose-600" />
                   <span className="hidden sm:inline text-rose-600 font-semibold">Sync Paused</span>
                 </>
-              )}
+              ) : null}
             </div>
           )}
 

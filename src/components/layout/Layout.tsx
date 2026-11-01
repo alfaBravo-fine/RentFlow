@@ -6,28 +6,19 @@ import { Lease, MaintenanceRequest } from '../../db/schema';
 import { AlertCircle, Clock, X, ChevronRight } from '../icons';
 import { useNavigate } from 'react-router-dom';
 
+import { useTheme } from '../theme/ThemeProvider';
+import { OfflineIndicator } from '../common/OfflineIndicator';
+
 export interface LayoutProps {
   children: React.ReactNode;
 }
 
 export const Layout: React.FC<LayoutProps> = ({ children }) => {
   const navigate = useNavigate();
-  const [isDarkMode, setIsDarkMode] = useState(() => {
-    return localStorage.getItem('rentflow_theme') === 'dark';
-  });
+  const { isDarkMode, toggleTheme } = useTheme();
 
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isBannerDismissed, setIsBannerDismissed] = useState(false);
-
-  useEffect(() => {
-    if (isDarkMode) {
-      document.documentElement.classList.add('dark');
-      localStorage.setItem('rentflow_theme', 'dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-      localStorage.setItem('rentflow_theme', 'light');
-    }
-  }, [isDarkMode]);
 
   // Check for critical items (e.g. leases expiring within 30 days or emergency maintenance)
   const leases = db.getTable<Lease>('leases');
@@ -56,7 +47,7 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
       <div className="flex flex-col flex-1 min-w-0 h-full overflow-hidden">
         <Topbar
           isDarkMode={isDarkMode}
-          onToggleTheme={() => setIsDarkMode(!isDarkMode)}
+          onToggleTheme={toggleTheme}
           onOpenSidebar={() => setIsMobileSidebarOpen(true)}
         />
 
@@ -95,6 +86,7 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
           </div>
         </main>
       </div>
+      <OfflineIndicator />
     </div>
   );
 };

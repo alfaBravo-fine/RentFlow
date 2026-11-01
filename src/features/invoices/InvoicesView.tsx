@@ -25,6 +25,8 @@ import {
   Receipt,
   CheckCircle2,
   Mail,
+  Pencil,
+  Trash2,
 } from '../../components/icons';
 
 export const InvoicesView: React.FC = () => {
@@ -42,11 +44,27 @@ export const InvoicesView: React.FC = () => {
   const [selectedInvoiceIds, setSelectedInvoiceIds] = useState<string[]>([]);
   const [isBulkRemindersOpen, setIsBulkRemindersOpen] = useState(false);
 
+  // Reactive DB subscription
+  React.useEffect(() => {
+    const unsub = db.onWrite(() => {
+      setInvoices(db.getTable<Invoice>('invoices'));
+    });
+    return unsub;
+  }, []);
+
   // Modals
   const [isRecordOpen, setIsRecordOpen] = useState(false);
+  const [payingInvoiceId, setPayingInvoiceId] = useState<string | null>(null);
   const [selectedLeaseId, setSelectedLeaseId] = useState(leases[0]?.id || '');
   const [paymentAmount, setPaymentAmount] = useState('1850');
   const [paymentMethod, setPaymentMethod] = useState(pack.paymentMethods[0] || 'ACH Bank Transfer');
+
+  // Edit Invoice modal state
+  const [isEditOpen, setIsEditOpen] = useState(false);
+  const [editingInvoice, setEditingInvoice] = useState<Invoice | null>(null);
+  const [editDueDate, setEditDueDate] = useState('');
+  const [editAmount, setEditAmount] = useState('');
+  const [editStatus, setEditStatus] = useState<Invoice['status']>('unpaid');
 
   // Print Receipt modal state
   const [activeReceiptData, setActiveReceiptData] = useState<{
@@ -63,16 +81,78 @@ export const InvoicesView: React.FC = () => {
   const [voidingInvoiceId, setVoidingInvoiceId] = useState<string | null>(null);
   const [voidReason, setVoidReason] = useState('Duplicate billing entry / Lease amendment');
 
-  const handleRecordPayment = (e: React.FormEvent) => {
+  const handleOpenEditModal = (inv: Invoice) => {
+    setEditingInvoice(inv);
+    setEditDueDate(inv.due_date);
+    setEditAmount(String(inv.total_minor / 100));
+    setEditStatus(inv.status);
+    setIsEditOpen(true);
+  };
+
+  const handleSaveEditInvoice = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedLeaseId) {
-      showToast({ type: 'error', message: 'Please select a lease agreement!' });
+    if (!editingInvoice) return;
+
+    const amountMinor = Math.round((parseFloat(editAmount) || 0) * 100);
+    if (amountMinor <= 0) {
+      showToast({ type: 'error', message: 'Invoice amount must be greater than zero!' });
       return;
     }
 
+    db.updateItem<Invoice>('invoices', editingInvoice.id, {
+      due_date: editDueDate,
+      subtotal_minor: amountMinor,
+      total_minor: amountMinor,
+      status: editStatus,
+    });
+
+    setInvoices(db.getTable<Invoice>('invoices'));
+    setIsEditOpen(false);
+    setEditingInvoice(null);
+    showToast({ type: 'success', message: `Invoice ${formatInvoiceNumber(editingInvoice.id)} updated successfully.` });
+  };
+
+  const handleDeleteInvoice = (inv: Invoice) => {
+    const success = db.deleteInvoiceCascading(inv.id);
+    if (success) {
+      setInvoices(db.getTable<Invoice>('invoices'));
+      showToast({
+        type: 'info',
+        message: `Invoice ${formatInvoiceNumber(inv.id)} and associated payments removed.`,
+      });
+    }
+  };
+
+  const handleRecordPayment = (e: React.FormEvent) => {
+    e.preventDefault();
     const amountMinor = Math.round((parseFloat(paymentAmount) || 0) * 100);
     if (amountMinor <= 0) {
       showToast({ type: 'error', message: 'Payment amount must be greater than zero!' });
+      return;
+    }
+
+    if (payingInvoiceId) {
+      const inv = invoices.find((i) => i.id === payingInvoiceId);
+      if (inv) {
+        const { payment } = db.recordInvoicePayment(
+          inv.id,
+          amountMinor,
+          paymentMethod,
+          `REF-${Date.now().toString().slice(-6)}`
+        );
+        setInvoices(db.getTable<Invoice>('invoices'));
+        setIsRecordOpen(false);
+        setPayingInvoiceId(null);
+        showToast({
+          type: 'success',
+          message: `Payment of ${formatMoney(amountMinor, pack)} recorded for ${formatInvoiceNumber(inv.id)} (Ref: ${payment.reference})`,
+        });
+        return;
+      }
+    }
+
+    if (!selectedLeaseId) {
+      showToast({ type: 'error', message: 'Please select a lease agreement!' });
       return;
     }
 
@@ -85,6 +165,7 @@ export const InvoicesView: React.FC = () => {
 
     setInvoices(db.getTable<Invoice>('invoices'));
     setIsRecordOpen(false);
+    setPayingInvoiceId(null);
     showToast({
       type: 'success',
       message: `FIFO payment of ${formatMoney(amountMinor, pack)} recorded (Ref: ${payment.reference})`,
@@ -419,6 +500,7 @@ export const InvoicesView: React.FC = () => {
                         {inv.status !== 'paid' && inv.status !== 'voided' && (
                           <button
                             onClick={() => {
+                              setPayingInvoiceId(inv.id);
                               setSelectedLeaseId(inv.lease_id);
                               setPaymentAmount(String((inv.total_minor - inv.amount_paid_minor) / 100));
                               setIsRecordOpen(true);
@@ -447,6 +529,22 @@ export const InvoicesView: React.FC = () => {
                           title="Send WhatsApp Reminder"
                         >
                           <Send className="w-3.5 h-3.5" />
+                        </button>
+
+                        <button
+                          onClick={() => handleOpenEditModal(inv)}
+                          className="w-8 h-8 rounded-full flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--accent)] hover:bg-[var(--bg-base)] cursor-pointer"
+                          title="Edit Invoice"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+
+                        <button
+                          onClick={() => handleDeleteInvoice(inv)}
+                          className="w-8 h-8 rounded-full flex items-center justify-center text-[var(--text-secondary)] hover:text-rose-600 hover:bg-[var(--bg-base)] cursor-pointer"
+                          title="Delete Invoice"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
                         </button>
 
                         {inv.status !== 'voided' && (
@@ -565,6 +663,65 @@ export const InvoicesView: React.FC = () => {
             </Button>
             <Button type="submit" variant="danger">
               Confirm Void Invoice
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Modal: Edit Invoice */}
+      <Modal
+        isOpen={isEditOpen}
+        onClose={() => {
+          setIsEditOpen(false);
+          setEditingInvoice(null);
+        }}
+        title={`Edit Invoice ${editingInvoice ? formatInvoiceNumber(editingInvoice.id) : ''}`}
+        description="Update invoice due date, total amount, or payment status."
+        maxWidth="md"
+      >
+        <form onSubmit={handleSaveEditInvoice} className="space-y-4">
+          <Input
+            label="Due Date *"
+            type="date"
+            value={editDueDate}
+            onChange={(e) => setEditDueDate(e.target.value)}
+            required
+          />
+
+          <Input
+            label={`Total Rent Amount (${pack.currency.code}) *`}
+            type="number"
+            step="0.01"
+            value={editAmount}
+            onChange={(e) => setEditAmount(e.target.value)}
+            required
+          />
+
+          <Select
+            label="Invoice Status"
+            value={editStatus}
+            onChange={(e) => setEditStatus(e.target.value as any)}
+          >
+            <option value="unpaid">Unpaid / Due</option>
+            <option value="partially_paid">Partially Paid</option>
+            <option value="paid">Paid</option>
+            <option value="overdue">Overdue</option>
+            <option value="voided">Voided</option>
+          </Select>
+
+          <div className="flex justify-end gap-3 pt-3 border-t border-[var(--border-subtle)]">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setIsEditOpen(false);
+                setEditingInvoice(null);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" variant="primary">
+              Save Changes
             </Button>
           </div>
         </form>

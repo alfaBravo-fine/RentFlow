@@ -40,6 +40,12 @@ export const PropertiesView: React.FC = () => {
   const [isAddPropOpen, setIsAddPropOpen] = useState(false);
   const [editingProp, setEditingProp] = useState<Property | null>(null);
 
+  React.useEffect(() => {
+    const handler = () => setIsAddPropOpen(true);
+    window.addEventListener('rentflow_open_new_property', handler);
+    return () => window.removeEventListener('rentflow_open_new_property', handler);
+  }, []);
+
   // Unit Modals
   const [isAddUnitOpen, setIsAddUnitOpen] = useState(false);
   const [editingUnit, setEditingUnit] = useState<Unit | null>(null);
@@ -144,21 +150,27 @@ export const PropertiesView: React.FC = () => {
     setPropLng('');
   };
 
-  const handleDeleteProp = (p: Property) => {
-    const success = db.softDeleteItem<Property>('properties', p.id);
-    if (success) {
+  // Listen to DB mutations
+  React.useEffect(() => {
+    const unsub = db.onWrite(() => {
       setProperties(db.getTable<Property>('properties'));
+      setUnits(db.getTable<Unit>('units'));
+    });
+    return unsub;
+  }, []);
+
+  const handleDeleteProp = (p: Property) => {
+    const success = db.deletePropertyCascading(p.id);
+    if (success) {
+      const remainingProps = db.getTable<Property>('properties');
+      setProperties(remainingProps);
+      setUnits(db.getTable<Unit>('units'));
       if (selectedPropId === p.id) {
-        setSelectedPropId(properties.find((item) => item.id !== p.id)?.id || null);
+        setSelectedPropId(remainingProps[0]?.id || null);
       }
       showToast({
         type: 'info',
-        message: `Property "${p.name}" archived`,
-        onUndo: () => {
-          db.updateItem<Property>('properties', p.id, { deleted_at: null });
-          setProperties(db.getTable<Property>('properties'));
-          showToast({ type: 'success', message: `Restored "${p.name}"` });
-        },
+        message: `Property "${p.name}" and associated units archived`,
       });
     }
   };
@@ -235,17 +247,12 @@ export const PropertiesView: React.FC = () => {
   };
 
   const handleDeleteUnit = (u: Unit) => {
-    const success = db.softDeleteItem<Unit>('units', u.id);
+    const success = db.deleteUnitCascading(u.id);
     if (success) {
       setUnits(db.getTable<Unit>('units'));
       showToast({
         type: 'info',
         message: `Unit "${u.name}" archived`,
-        onUndo: () => {
-          db.updateItem<Unit>('units', u.id, { deleted_at: null });
-          setUnits(db.getTable<Unit>('units'));
-          showToast({ type: 'success', message: `Restored "${u.name}"` });
-        },
       });
     }
   };

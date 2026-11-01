@@ -1,10 +1,11 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { db } from '../../db/client';
-import { Property, Unit, Lease, Invoice, MaintenanceRequest, Tenant, DocumentVaultItem } from '../../db/schema';
+import { Property, Unit, Lease, Invoice, MaintenanceRequest, Tenant, DocumentVaultItem, Payment } from '../../db/schema';
 import { usePack } from '../../countries/usePack';
 import { formatMoney } from '../../lib/money';
 import { buildWhatsAppLink, buildEmailLink } from '../../lib/deepLinks';
+import { formatLeaseName } from '../../lib/formatNames';
 import { Card, CardHeader, CardTitle } from '../../components/ui/Card';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
@@ -41,14 +42,48 @@ import {
 export const DashboardView: React.FC = () => {
   const navigate = useNavigate();
   const pack = usePack();
+  const [, setRevision] = useState(0);
 
-  const properties = db.getTable<Property>('properties').filter((p) => !p.deleted_at);
-  const units = db.getTable<Unit>('units').filter((u) => !u.deleted_at);
-  const leases = db.getTable<Lease>('leases').filter((l) => !l.deleted_at);
-  const invoices = db.getTable<Invoice>('invoices').filter((i) => !i.deleted_at);
-  const maintenance = db.getTable<MaintenanceRequest>('maintenance_requests').filter((m) => !m.deleted_at);
-  const tenants = db.getTable<Tenant>('tenants').filter((t) => !t.deleted_at);
-  const documents = db.getTable<DocumentVaultItem>('documents').filter((d) => !d.deleted_at);
+  // Subscribe to reactive DB writes so Dashboard updates instantly
+  useEffect(() => {
+    const unsubscribe = db.onWrite(() => {
+      setRevision((r) => r + 1);
+    });
+    return unsubscribe;
+  }, []);
+
+  // Strict cascading queries filtering out deleted records
+  const properties = db.getTable<Property>('properties').filter((p) => !p.deleted_at && !(p as any).deletedAt);
+  const propertyIds = new Set(properties.map((p) => p.id));
+
+  // Units MUST belong to a non-deleted property and have deleted_at === null
+  const units = db.getTable<Unit>('units').filter(
+    (u) => !u.deleted_at && !(u as any).deletedAt && propertyIds.has(u.property_id)
+  );
+  const unitIds = new Set(units.map((u) => u.id));
+
+  // Leases MUST belong to a non-deleted unit and have deleted_at === null
+  const leases = db.getTable<Lease>('leases').filter(
+    (l) => !l.deleted_at && !(l as any).deletedAt && unitIds.has(l.unit_id)
+  );
+  const leaseIds = new Set(leases.map((l) => l.id));
+
+  // Invoices MUST belong to a non-deleted lease and have deleted_at === null
+  const invoices = db.getTable<Invoice>('invoices').filter(
+    (i) => !i.deleted_at && !(i as any).deletedAt && leaseIds.has(i.lease_id)
+  );
+  const invoiceIds = new Set(invoices.map((i) => i.id));
+
+  // Payments MUST belong to a non-deleted invoice and have deleted_at === null
+  const payments = db.getTable<Payment>('payments').filter(
+    (p) => !p.deleted_at && !(p as any).deletedAt && (p.invoice_id === 'unallocated' || invoiceIds.has(p.invoice_id))
+  );
+
+  const maintenance = db.getTable<MaintenanceRequest>('maintenance_requests').filter(
+    (m) => !m.deleted_at && !(m as any).deletedAt && (!m.unit_id || unitIds.has(m.unit_id))
+  );
+  const tenants = db.getTable<Tenant>('tenants').filter((t) => !t.deleted_at && !(t as any).deletedAt);
+  const documents = db.getTable<DocumentVaultItem>('documents').filter((d) => !d.deleted_at && !(d as any).deletedAt);
 
   // KPIs - Strict live database calculations
   const totalUnits = units.length;
@@ -58,26 +93,44 @@ export const DashboardView: React.FC = () => {
 
   const expectedRentMinor = units.reduce((acc, u) => acc + (u.status === 'occupied' ? u.rent_minor : 0), 0);
 
-  const paidInvoices = invoices.filter((i) => i.status === 'paid');
-  const collectedRentMinor = paidInvoices.reduce((acc, i) => acc + i.amount_paid_minor, 0);
+  // Fix 4: Collected (MTD) sums all payments recorded in current month
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth();
+
+  const mtdPayments = payments.filter((p) => {
+    if (!p.paid_at) return false;
+    const pDate = new Date(p.paid_at);
+    return pDate.getFullYear() === currentYear && pDate.getMonth() === currentMonth;
+  });
+
+  const collectedMtdMinor = mtdPayments.length > 0
+    ? mtdPayments.reduce((acc, p) => acc + (p.amount_minor || 0), 0)
+    : invoices.reduce((acc, i) => acc + (i.amount_paid_minor || 0), 0);
+
+  // Fix 4: Pending Rent sums (total - amountPaid) for all invoices where status !== 'paid' && status !== 'voided'
+  const activeUnpaidInvoices = invoices.filter((i) => i.status !== 'paid' && i.status !== 'voided');
+  const pendingRentMinor = activeUnpaidInvoices.reduce(
+    (acc, i) => acc + Math.max(0, i.total_minor - i.amount_paid_minor),
+    0
+  );
 
   const overdueInvoices = invoices.filter(
-    (i) => i.status === 'overdue' || (i.status === 'partially_paid' && new Date(i.due_date) < new Date())
+    (i) => i.status === 'overdue' || (i.status === 'partially_paid' && new Date(i.due_date) < now)
   );
-  const totalArrearsMinor = overdueInvoices.reduce((acc, i) => acc + (i.total_minor - i.amount_paid_minor), 0);
 
   const pendingMaintenance = maintenance.filter(
     (m) => m.status !== 'completed' && m.status !== 'closed'
   );
 
   // Expiring leases in next 90 days categorized into 30 / 60 / 90 days buckets
-  const now = Date.now();
+  const nowMs = Date.now();
   const dayMs = 24 * 60 * 60 * 1000;
 
   const expiringLeasesWithDays = leases
     .filter((l) => l.status !== 'expired' && l.status !== 'terminated')
     .map((l) => {
-      const diffMs = new Date(l.end_date).getTime() - now;
+      const diffMs = new Date(l.end_date).getTime() - nowMs;
       const daysLeft = Math.ceil(diffMs / dayMs);
       return { lease: l, daysLeft };
     })
@@ -91,22 +144,22 @@ export const DashboardView: React.FC = () => {
   // Document expiration alerts (within 30 days)
   const expiringDocuments = documents.filter((doc) => {
     if (!doc.expiry_date) return false;
-    const diffMs = new Date(doc.expiry_date).getTime() - now;
+    const diffMs = new Date(doc.expiry_date).getTime() - nowMs;
     const daysLeft = Math.ceil(diffMs / dayMs);
     return daysLeft <= 30;
   });
 
-  // Recharts Monthly Collection Trends (Expected vs Collected vs Arrears)
-  const chartData = [
+  // Recharts Monthly Collection Trends (Expected vs Collected)
+  const chartData = totalUnits === 0 ? [] : [
     { month: 'Jun', Expected: Math.round(expectedRentMinor / 100), Collected: Math.round((expectedRentMinor * 0.92) / 100) },
     { month: 'Jul', Expected: Math.round(expectedRentMinor / 100), Collected: Math.round((expectedRentMinor * 0.95) / 100) },
     { month: 'Aug', Expected: Math.round(expectedRentMinor / 100), Collected: Math.round((expectedRentMinor * 0.88) / 100) },
     { month: 'Sep', Expected: Math.round(expectedRentMinor / 100), Collected: Math.round((expectedRentMinor * 0.94) / 100) },
-    { month: 'Oct', Expected: Math.round(expectedRentMinor / 100), Collected: Math.round(collectedRentMinor / 100) },
+    { month: 'Oct', Expected: Math.round(expectedRentMinor / 100), Collected: Math.round(collectedMtdMinor / 100) },
   ];
 
   // Recharts Occupancy Donut Data
-  const occupancyPieData = [
+  const occupancyPieData = totalUnits === 0 ? [] : [
     { name: 'Occupied Units', value: occupiedUnits, color: '#4F46E5' },
     { name: 'Vacant Units', value: vacantUnits, color: '#E5E7EB' },
   ];
@@ -120,7 +173,7 @@ export const DashboardView: React.FC = () => {
             Portfolio Command Dashboard
           </h1>
           <p className="text-xs text-[var(--text-secondary)] mt-1">
-            Real-time offline ledger &bull; {totalUnits} Units across {properties.length} Properties ({pack.name} {pack.currency.code})
+            Real-time ledger &bull; {totalUnits} Units across {properties.length} Properties ({pack.name} {pack.currency.code})
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -201,7 +254,7 @@ export const DashboardView: React.FC = () => {
           </div>
         </Card>
 
-        {/* Metric 3: Pending Rent (Arrears) */}
+        {/* Metric 3: Pending Rent (Arrears) & Outstanding Balance */}
         <Card className="space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider">
@@ -212,13 +265,15 @@ export const DashboardView: React.FC = () => {
             </div>
           </div>
           <div className="text-2xl font-black number-tabular text-rose-600 dark:text-rose-400">
-            {formatMoney(totalArrearsMinor, pack)}
+            {formatMoney(pendingRentMinor, pack)}
           </div>
           <div className="flex items-center justify-between text-xs text-[var(--text-secondary)] pt-2 border-t border-[var(--border-subtle)]">
+            <span className="text-[11px] font-medium text-[var(--text-primary)]">
+              Outstanding: {formatMoney(pendingRentMinor, pack)}
+            </span>
             <Badge variant={overdueInvoices.length > 0 ? 'danger' : 'neutral'}>
               {overdueInvoices.length} Overdue
             </Badge>
-            <span className="text-xs text-rose-600 font-medium">Action Needed</span>
           </div>
         </Card>
 
@@ -252,7 +307,7 @@ export const DashboardView: React.FC = () => {
             </div>
           </div>
           <div className="text-2xl font-black number-tabular text-emerald-600 dark:text-emerald-400">
-            {formatMoney(collectedRentMinor, pack)}
+            {formatMoney(collectedMtdMinor, pack)}
           </div>
           <div className="flex items-center justify-between text-xs text-[var(--text-secondary)] pt-2 border-t border-[var(--border-subtle)]">
             <span>Target: {formatMoney(expectedRentMinor, pack)}</span>
@@ -274,26 +329,34 @@ export const DashboardView: React.FC = () => {
             </div>
             <Badge variant="accent">{pack.currency.code} Figures</Badge>
           </CardHeader>
-          <div className="h-64 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
-                <XAxis dataKey="month" stroke="var(--text-secondary)" fontSize={12} tickLine={false} />
-                <YAxis stroke="var(--text-secondary)" fontSize={12} tickLine={false} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: 'var(--bg-surface)',
-                    borderColor: 'var(--border-strong)',
-                    borderRadius: '12px',
-                    color: 'var(--text-primary)',
-                    fontSize: '12px',
-                    boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
-                  }}
-                />
-                <Legend wrapperStyle={{ fontSize: '12px', paddingTop: '8px' }} />
-                <Bar dataKey="Expected" name="Target Rent Roll" fill="var(--border-strong)" radius={[6, 6, 0, 0]} />
-                <Bar dataKey="Collected" name="Realized Collections" fill="var(--accent)" radius={[6, 6, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+          <div className="h-64 w-full flex items-center justify-center">
+            {chartData.length === 0 || expectedRentMinor === 0 ? (
+              <div className="text-center p-8 text-xs text-[var(--text-secondary)]">
+                <Receipt className="w-8 h-8 mx-auto mb-2 opacity-40 text-[var(--accent)]" />
+                <p className="font-medium text-[var(--text-primary)]">No Active Rent Roll</p>
+                <p className="mt-1">Add properties, units, and leases to generate monthly income comparisons.</p>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
+                  <XAxis dataKey="month" stroke="var(--text-secondary)" fontSize={12} tickLine={false} />
+                  <YAxis stroke="var(--text-secondary)" fontSize={12} tickLine={false} />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: 'var(--bg-surface)',
+                      borderColor: 'var(--border-strong)',
+                      borderRadius: '12px',
+                      color: 'var(--text-primary)',
+                      fontSize: '12px',
+                      boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
+                    }}
+                  />
+                  <Legend wrapperStyle={{ fontSize: '12px', paddingTop: '8px' }} />
+                  <Bar dataKey="Expected" name="Target Rent Roll" fill="var(--border-strong)" radius={[6, 6, 0, 0]} />
+                  <Bar dataKey="Collected" name="Realized Collections" fill="var(--accent)" radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </Card>
 
@@ -307,35 +370,45 @@ export const DashboardView: React.FC = () => {
             <span className="text-sm font-bold font-mono text-[var(--accent)]">{occupancyRate}%</span>
           </CardHeader>
           <div className="h-52 w-full relative flex items-center justify-center">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={occupancyPieData}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={55}
-                  outerRadius={75}
-                  paddingAngle={4}
-                  dataKey="value"
-                >
-                  {occupancyPieData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={entry.color} />
-                  ))}
-                </Pie>
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: 'var(--bg-surface)',
-                    borderColor: 'var(--border-strong)',
-                    borderRadius: '12px',
-                    fontSize: '12px',
-                  }}
-                />
-              </PieChart>
-            </ResponsiveContainer>
-            <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-              <span className="text-2xl font-black text-[var(--text-primary)] font-mono">{occupancyRate}%</span>
-              <span className="text-[10px] text-[var(--text-secondary)] uppercase tracking-wider font-semibold">Occupied</span>
-            </div>
+            {totalUnits === 0 ? (
+              <div className="text-center p-6 text-xs text-[var(--text-secondary)]">
+                <Users className="w-8 h-8 mx-auto mb-2 opacity-40 text-indigo-500" />
+                <p className="font-medium text-[var(--text-primary)]">0 Units in Portfolio</p>
+                <p className="mt-1">Add properties to track portfolio occupancy.</p>
+              </div>
+            ) : (
+              <>
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={occupancyPieData}
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={55}
+                      outerRadius={75}
+                      paddingAngle={4}
+                      dataKey="value"
+                    >
+                      {occupancyPieData.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.color} />
+                      ))}
+                    </Pie>
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: 'var(--bg-surface)',
+                        borderColor: 'var(--border-strong)',
+                        borderRadius: '12px',
+                        fontSize: '12px',
+                      }}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                  <span className="text-2xl font-black text-[var(--text-primary)] font-mono">{occupancyRate}%</span>
+                  <span className="text-[10px] text-[var(--text-secondary)] uppercase tracking-wider font-semibold">Occupied</span>
+                </div>
+              </>
+            )}
           </div>
           <div className="flex justify-around text-xs text-[var(--text-secondary)] border-t border-[var(--border-subtle)] pt-3">
             <div className="flex items-center gap-2">

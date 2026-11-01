@@ -84,6 +84,8 @@ import {
   Star,
   Cloud,
   CloudOff,
+  Wifi,
+  WifiOff,
 } from 'lucide-react';
 
 export {
@@ -171,4 +173,6 @@ export {
   Star,
   Cloud,
   CloudOff,
+  Wifi,
+  WifiOff,
 };

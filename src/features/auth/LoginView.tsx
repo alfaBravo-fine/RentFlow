@@ -9,6 +9,7 @@ import { ShieldCheck, Lock, RefreshCw, AlertCircle, Database, Folder } from '../
 import { RentFlowLogo } from '../../components/brand/RentFlowLogo';
 
 import { GOOGLE_CLIENT_ID } from '../../config/google';
+import { isTauri, tauriGoogleOAuth, tauriDrivePullBackup } from '../../lib/tauri/bridge';
 
 export const LoginView: React.FC = () => {
   const setAuthenticating = useAuthStore((s) => s.setAuthenticating);
@@ -79,6 +80,40 @@ export const LoginView: React.FC = () => {
       setAuthenticating(false, 'Google Sign-In popup was closed or authorization failed.');
     },
   });
+
+  const handleDesktopSignIn = async () => {
+    try {
+      setAuthenticating(true, null);
+      setStatusText('Starting Desktop loopback server & opening browser...');
+
+      const profile = await tauriGoogleOAuth();
+      setStatusText('Signed in successfully! Checking encrypted cloud backup...');
+
+      // Pull & restore cloud backup in Rust backend
+      const pullResult = await tauriDrivePullBackup(profile.id).catch(() => ({ restored: false }));
+
+      setGoogleSession(
+        {
+          sub: profile.id,
+          email: profile.email,
+          name: profile.name,
+          picture: profile.picture,
+        },
+        'tauri_desktop_token_secured_in_rust',
+        ''
+      );
+
+      if (pullResult.restored) {
+        setStatusText('Restored cloud backup into SQLCipher database! Opening dashboard...');
+        setTimeout(() => window.location.reload(), 600);
+      }
+    } catch (err: any) {
+      console.error('[Tauri Desktop Sign-in] Error:', err);
+      setAuthenticating(false, err.message || 'Desktop OAuth failed.');
+    } finally {
+      setStatusText(null);
+    }
+  };
 
   if (!googleClientId) {
     return (
@@ -186,9 +221,13 @@ export const LoginView: React.FC = () => {
               variant="primary"
               className="w-full py-3 h-12 gap-3 font-semibold text-sm rounded-xl cursor-pointer shadow-md transition-all active:scale-[0.99]"
               onClick={() => {
-                setAuthenticating(true, null);
-                setStatusText('Opening Google OAuth Popup...');
-                handleGoogleSignIn();
+                if (isTauri()) {
+                  handleDesktopSignIn();
+                } else {
+                  setAuthenticating(true, null);
+                  setStatusText('Opening Google OAuth Popup...');
+                  handleGoogleSignIn();
+                }
               }}
               disabled={isAuthenticating}
             >

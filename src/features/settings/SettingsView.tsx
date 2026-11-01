@@ -343,6 +343,8 @@ export const SettingsView: React.FC = () => {
     setTimeout(() => window.location.reload(), 1000);
   };
 
+  const [isForceSyncing, setIsForceSyncing] = useState(false);
+
   return (
     <div className="space-y-6 max-w-5xl mx-auto pb-12">
       <div>
@@ -604,22 +606,22 @@ export const SettingsView: React.FC = () => {
             variant="primary"
             size="sm"
             onClick={async () => {
-              setIsImportingCsv(true);
+              setIsForceSyncing(true);
               try {
                 showToast({ type: 'info', message: 'Executing Google Drive multipart upload...' });
                 await syncNow();
-                showToast({ type: 'success', message: 'Force Sync executed! Check F12 Console logs for details.' });
+                showToast({ type: 'success', message: 'Force Sync executed! Database backed up to Google Drive.' });
               } catch (err: any) {
                 showToast({ type: 'error', message: err.message || 'Drive sync failed' });
               } finally {
-                setIsImportingCsv(false);
+                setIsForceSyncing(false);
               }
             }}
-            disabled={isImportingCsv || syncState === 'syncing'}
+            disabled={isForceSyncing || syncState === 'syncing'}
             className="gap-2"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${isImportingCsv || syncState === 'syncing' ? 'animate-spin' : ''}`} />
-            <span>{isImportingCsv || syncState === 'syncing' ? 'Syncing...' : 'Force Sync to Google Drive'}</span>
+            <RefreshCw className={`w-3.5 h-3.5 ${isForceSyncing || syncState === 'syncing' ? 'animate-spin' : ''}`} />
+            <span>{isForceSyncing || syncState === 'syncing' ? 'Syncing...' : 'Force Sync to Google Drive'}</span>
           </Button>
 
           <Button variant="outline" size="sm" onClick={handleExportBackup}>
