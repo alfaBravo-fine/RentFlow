@@ -23,7 +23,9 @@ import {
   FileSpreadsheet,
   Search,
   Eye,
+  RefreshCw,
 } from '../../components/icons';
+import { BankReconciliationModal } from './BankReconciliationModal';
 
 export const ExpensesView: React.FC = () => {
   const pack = usePack();
@@ -41,6 +43,7 @@ export const ExpensesView: React.FC = () => {
   const [editingExpense, setEditingExpense] = useState<Expense | null>(null);
   const [deletingExpense, setDeletingExpense] = useState<Expense | null>(null);
   const [viewingReceipt, setViewingReceipt] = useState<string | null>(null);
+  const [isReconOpen, setIsReconOpen] = useState(false);
 
   // Form states
   const [propertyId, setPropertyId] = useState(properties[0]?.id || '');
@@ -176,7 +179,16 @@ export const ExpensesView: React.FC = () => {
             General repairs, property taxes, insurance premiums, and contractor disbursements ({pack.name})
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <Button
+            variant="outline"
+            onClick={() => setIsReconOpen(true)}
+            className="gap-2 border-emerald-600/30 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/30 font-medium"
+            title="Upload bank statement CSV and auto-match deposits to tenants"
+          >
+            <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+            <span>Bank Reconciliation (Auto-Match)</span>
+          </Button>
           <Button variant="primary" onClick={handleOpenAdd} className="gap-2">
             <Plus className="w-4 h-4" />
             <span>Log Expense</span>
@@ -516,6 +528,13 @@ export const ExpensesView: React.FC = () => {
           </div>
         </div>
       </Modal>
+
+      {/* Bank Reconciliation Modal */}
+      <BankReconciliationModal
+        isOpen={isReconOpen}
+        onClose={() => setIsReconOpen(false)}
+        onReconciled={() => setExpenses(db.getTable<Expense>('expenses').filter((e) => !e.deleted_at))}
+      />
     </div>
   );
 };

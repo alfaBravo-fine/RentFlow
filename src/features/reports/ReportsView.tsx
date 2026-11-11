@@ -5,9 +5,13 @@ import { usePack } from '../../countries/usePack';
 import { formatMoney } from '../../lib/money';
 import { exportToXLSX } from '../../lib/xlsx';
 import { useToast } from '../../components/toast/ToastContext';
+import { usePrint } from '../../components/print/PrintContext';
+import { AuditReportPrintable } from '../../components/print/AuditReportPrintable';
 import { Card, CardHeader, CardTitle } from '../../components/ui/Card';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
+import { Modal } from '../../components/ui/Modal';
+import { handlePrint } from '../../lib/print';
 import {
   BarChart3,
   Download,
@@ -94,10 +98,17 @@ export const ReportsView: React.FC = () => {
     showToast({ type: 'success', message: 'Full Multi-Sheet Excel (.xlsx) statement generated!' });
   };
 
+  const [isAuditModalOpen, setIsAuditModalOpen] = useState(false);
+
+  const handlePrintAudit = () => {
+    setIsAuditModalOpen(true);
+    handlePrint();
+  };
+
   return (
     <div className="space-y-8">
-      {/* Top Header */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
+      {/* Top Header - hidden during print */}
+      <div className="no-print flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-[var(--text-primary)]">
             Tax & Financial P&L Statements
@@ -115,16 +126,18 @@ export const ReportsView: React.FC = () => {
             <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
             <span>Export Excel (.xlsx)</span>
           </Button>
-          <Button variant="primary" onClick={() => window.print()} className="gap-2">
+          <Button variant="primary" onClick={handlePrintAudit} className="gap-2 shadow-sm">
             <Printer className="w-4 h-4" />
             <span>Print Audit Statement</span>
           </Button>
         </div>
       </div>
 
-      {/* KPI Cards in Active Pack Currency (Never hardcoded $) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-        <Card className="space-y-2">
+      {/* Audit Content */}
+      <div className="space-y-8">
+        {/* KPI Cards in Active Pack Currency */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+          <Card className="space-y-2">
           <span className="text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider">
             Gross Rental Collections
           </span>
@@ -256,6 +269,44 @@ export const ReportsView: React.FC = () => {
           </table>
         </div>
       </Card>
+      </div>
+
+      {/* Audit Statement Preview & Print Modal */}
+      <Modal
+        isOpen={isAuditModalOpen}
+        onClose={() => setIsAuditModalOpen(false)}
+        title={`Audit Statement Preview (CY ${selectedYear})`}
+        description="Formal financial P&L statement certified for audit and compliance."
+        maxWidth="2xl"
+      >
+        <div className="space-y-6">
+          <div className="bg-[var(--bg-base)] border border-[var(--border-subtle)] rounded-xl p-3 sm:p-6 overflow-x-auto">
+            <div className="print-area bg-white text-black border border-gray-200 rounded-lg p-6 sm:p-8 shadow-xs max-w-[760px] mx-auto">
+              <AuditReportPrintable
+                pack={pack}
+                selectedYear={selectedYear}
+                totalRentCollectedMinor={totalRentCollectedMinor}
+                totalExpensesMinor={totalExpensesMinor}
+                netOperatingIncomeMinor={netOperatingIncomeMinor}
+                estimatedWithholdingTaxMinor={estimatedWithholdingTaxMinor}
+                paidInvoicesCount={paidInvoices.length}
+                expensesCount={expenses.length}
+                expensesByCategory={expensesByCategory}
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end gap-3 pt-3 border-t border-[var(--border-subtle)] no-print">
+            <Button variant="outline" onClick={() => setIsAuditModalOpen(false)}>
+              Close
+            </Button>
+            <Button variant="primary" onClick={() => handlePrint()} className="gap-2">
+              <Printer className="w-4 h-4" />
+              <span>Print Audit Statement</span>
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 };

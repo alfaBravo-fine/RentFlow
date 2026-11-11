@@ -1,63 +1,62 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
-
-type Theme = 'light' | 'dark';
+import React, { createContext, useContext, useEffect } from 'react';
+import { useThemeStore, ThemeMode, ColorPalette, ThemeConfig, applyThemeToDOM } from '../../stores/themeStore';
 
 interface ThemeContextType {
-  theme: Theme;
+  theme: ThemeMode;
+  mode: ThemeMode;
+  colorPalette: ColorPalette;
+  themeConfig: ThemeConfig;
   isDarkMode: boolean;
   toggleTheme: () => void;
-  setTheme: (theme: Theme) => void;
+  setTheme: (theme: ThemeMode) => void;
+  setMode: (mode: ThemeMode) => void;
+  setColorPalette: (palette: ColorPalette) => void;
+  setFullTheme: (config: ThemeConfig) => void;
 }
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
 export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [theme, setThemeState] = useState<Theme>(() => {
-    try {
-      const stored = localStorage.getItem('rentflow-theme') || localStorage.getItem('rentflow_theme');
-      if (stored === 'dark' || stored === 'light') return stored;
-      if (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
-        return 'dark';
-      }
-    } catch (e) {
-      console.warn('Error reading theme from localStorage:', e);
-    }
-    return 'light';
-  });
+  const { theme, setMode, setColorPalette, setTheme, toggleMode } = useThemeStore();
 
+  // On mount and state change, ensure class="dark" and data-theme="[palette]" are applied
   useEffect(() => {
-    try {
-      localStorage.setItem('rentflow-theme', theme);
-      localStorage.setItem('rentflow_theme', theme);
-      if (theme === 'dark') {
-        document.documentElement.classList.add('dark');
-      } else {
-        document.documentElement.classList.remove('dark');
-      }
-    } catch (e) {
-      console.warn('Error saving theme to localStorage:', e);
-    }
-  }, [theme]);
+    applyThemeToDOM(theme.mode, theme.colorPalette);
+  }, [theme.mode, theme.colorPalette]);
 
-  const toggleTheme = () => {
-    setThemeState((prev) => (prev === 'dark' ? 'light' : 'dark'));
+  const value: ThemeContextType = {
+    theme: theme.mode,
+    mode: theme.mode,
+    colorPalette: theme.colorPalette,
+    themeConfig: theme,
+    isDarkMode: theme.mode === 'dark',
+    toggleTheme: toggleMode,
+    setTheme: (newMode: ThemeMode) => setMode(newMode),
+    setMode,
+    setColorPalette,
+    setFullTheme: setTheme,
   };
 
-  const setTheme = (newTheme: Theme) => {
-    setThemeState(newTheme);
-  };
-
-  return (
-    <ThemeContext.Provider value={{ theme, isDarkMode: theme === 'dark', toggleTheme, setTheme }}>
-      {children}
-    </ThemeContext.Provider>
-  );
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 };
 
 export const useTheme = (): ThemeContextType => {
   const context = useContext(ThemeContext);
   if (!context) {
-    throw new Error('useTheme must be used within a ThemeProvider');
+    // Graceful fallback to store directly if used outside provider
+    const store = useThemeStore.getState();
+    return {
+      theme: store.theme.mode,
+      mode: store.theme.mode,
+      colorPalette: store.theme.colorPalette,
+      themeConfig: store.theme,
+      isDarkMode: store.theme.mode === 'dark',
+      toggleTheme: store.toggleMode,
+      setTheme: (m) => store.setMode(m),
+      setMode: store.setMode,
+      setColorPalette: store.setColorPalette,
+      setFullTheme: store.setTheme,
+    };
   }
   return context;
 };

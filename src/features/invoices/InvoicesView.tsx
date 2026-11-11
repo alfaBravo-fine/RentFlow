@@ -1,11 +1,13 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { dexieDb } from '../../db/dexieDb';
 import { db } from '../../db/client';
-import { Invoice, Payment, Lease, Tenant, Property, Unit, Organization } from '../../db/schema';
+import { Invoice, Payment, Lease, Tenant, Property, Unit, Organization, Credit } from '../../db/schema';
 import { usePack } from '../../countries/usePack';
 import { formatMoney } from '../../lib/money';
 import { computeLateFee } from '../../lib/lateFee';
 import { exportToXLSX } from '../../lib/xlsx';
-import { buildWhatsAppLink, buildEmailLink } from '../../lib/deepLinks';
+import { openWhatsAppMessage } from '../../lib/deepLinks';
 import { formatLeaseName, formatInvoiceNumber } from '../../lib/formatNames';
 import { useToast } from '../../components/toast/ToastContext';
 import { Card, CardHeader, CardTitle } from '../../components/ui/Card';
@@ -33,24 +35,42 @@ export const InvoicesView: React.FC = () => {
   const pack = usePack();
   const { showToast } = useToast();
 
-  const [invoices, setInvoices] = useState<Invoice[]>(() => db.getTable<Invoice>('invoices'));
+  // Dexie useLiveQuery for automatic reactive re-rendering on database updates
+  const liveInvoices = useLiveQuery(
+    () => dexieDb.invoices.filter((i) => !i.deleted_at && !(i as any).deletedAt).toArray(),
+    []
+  );
+  const livePayments = useLiveQuery(
+    () => dexieDb.payments.filter((p) => !p.deleted_at && !(p as any).deletedAt).toArray(),
+    []
+  );
+
+  const [memoryInvoices, setMemoryInvoices] = useState<Invoice[]>(() => db.getTable<Invoice>('invoices'));
+  const [memoryPayments, setMemoryPayments] = useState<Payment[]>(() => db.getTable<Payment>('payments'));
+
   const leases = db.getTable<Lease>('leases');
   const tenants = db.getTable<Tenant>('tenants');
   const units = db.getTable<Unit>('units');
   const properties = db.getTable<Property>('properties');
+  const credits = db.getTable<Credit>('credits');
   const org = db.getTable<Organization>('organizations')[0] || { name: 'Horizon Property Management' };
+
+  // Reactive DB subscription fallback
+  useEffect(() => {
+    const unsub = db.onWrite(() => {
+      setMemoryInvoices(db.getTable<Invoice>('invoices'));
+      setMemoryPayments(db.getTable<Payment>('payments'));
+    });
+    return unsub;
+  }, []);
+
+  // Use live Dexie query data when available, with fallback to in-memory store
+  const invoices = liveInvoices !== undefined ? liveInvoices : memoryInvoices;
+  const payments = livePayments !== undefined ? livePayments : memoryPayments;
 
   // Bulk reminders state (Feature 2.4)
   const [selectedInvoiceIds, setSelectedInvoiceIds] = useState<string[]>([]);
   const [isBulkRemindersOpen, setIsBulkRemindersOpen] = useState(false);
-
-  // Reactive DB subscription
-  React.useEffect(() => {
-    const unsub = db.onWrite(() => {
-      setInvoices(db.getTable<Invoice>('invoices'));
-    });
-    return unsub;
-  }, []);
 
   // Modals
   const [isRecordOpen, setIsRecordOpen] = useState(false);
@@ -65,6 +85,10 @@ export const InvoicesView: React.FC = () => {
   const [editDueDate, setEditDueDate] = useState('');
   const [editAmount, setEditAmount] = useState('');
   const [editStatus, setEditStatus] = useState<Invoice['status']>('unpaid');
+
+  // Delete Payment modal state
+  const [paymentToDelete, setPaymentToDelete] = useState<Payment | null>(null);
+  const [isDeletePaymentModalOpen, setIsDeletePaymentModalOpen] = useState(false);
 
   // Print Receipt modal state
   const [activeReceiptData, setActiveReceiptData] = useState<{
@@ -106,7 +130,7 @@ export const InvoicesView: React.FC = () => {
       status: editStatus,
     });
 
-    setInvoices(db.getTable<Invoice>('invoices'));
+    setMemoryInvoices(db.getTable<Invoice>('invoices'));
     setIsEditOpen(false);
     setEditingInvoice(null);
     showToast({ type: 'success', message: `Invoice ${formatInvoiceNumber(editingInvoice.id)} updated successfully.` });
@@ -115,12 +139,30 @@ export const InvoicesView: React.FC = () => {
   const handleDeleteInvoice = (inv: Invoice) => {
     const success = db.deleteInvoiceCascading(inv.id);
     if (success) {
-      setInvoices(db.getTable<Invoice>('invoices'));
+      setMemoryInvoices(db.getTable<Invoice>('invoices'));
+      setMemoryPayments(db.getTable<Payment>('payments'));
       showToast({
         type: 'info',
         message: `Invoice ${formatInvoiceNumber(inv.id)} and associated payments removed.`,
       });
     }
+  };
+
+  const handleConfirmDeletePayment = () => {
+    if (!paymentToDelete) return;
+    const success = db.deletePayment(paymentToDelete.id);
+    if (success) {
+      setMemoryInvoices(db.getTable<Invoice>('invoices'));
+      setMemoryPayments(db.getTable<Payment>('payments'));
+      showToast({
+        type: 'info',
+        message: `Payment (${paymentToDelete.reference || paymentToDelete.id.slice(0, 8)}) deleted and invoice balance reversed successfully.`,
+      });
+    } else {
+      showToast({ type: 'error', message: 'Failed to delete payment.' });
+    }
+    setIsDeletePaymentModalOpen(false);
+    setPaymentToDelete(null);
   };
 
   const handleRecordPayment = (e: React.FormEvent) => {
@@ -140,7 +182,8 @@ export const InvoicesView: React.FC = () => {
           paymentMethod,
           `REF-${Date.now().toString().slice(-6)}`
         );
-        setInvoices(db.getTable<Invoice>('invoices'));
+        setMemoryInvoices(db.getTable<Invoice>('invoices'));
+        setMemoryPayments(db.getTable<Payment>('payments'));
         setIsRecordOpen(false);
         setPayingInvoiceId(null);
         showToast({
@@ -163,7 +206,8 @@ export const InvoicesView: React.FC = () => {
       `REF-${Date.now().toString().slice(-6)}`
     );
 
-    setInvoices(db.getTable<Invoice>('invoices'));
+    setMemoryInvoices(db.getTable<Invoice>('invoices'));
+    setMemoryPayments(db.getTable<Payment>('payments'));
     setIsRecordOpen(false);
     setPayingInvoiceId(null);
     showToast({
@@ -174,24 +218,23 @@ export const InvoicesView: React.FC = () => {
 
   const handleApplyLateFees = () => {
     let appliedCount = 0;
-    const updatedInvoices = invoices.map((inv) => {
+    invoices.forEach((inv) => {
       const lease = leases.find((l) => l.id === inv.lease_id);
-      if (!lease || inv.status === 'paid' || inv.status === 'voided') return inv;
+      if (!lease || inv.status === 'paid' || inv.status === 'voided') return;
 
       const feeRes = computeLateFee(inv, lease, pack, new Date());
       if (feeRes.feeMinor > 0 && inv.late_fee_minor !== feeRes.feeMinor) {
         appliedCount++;
         const newTotal = inv.subtotal_minor + feeRes.feeMinor;
-        return db.updateItem<Invoice>('invoices', inv.id, {
+        db.updateItem<Invoice>('invoices', inv.id, {
           late_fee_minor: feeRes.feeMinor,
           total_minor: newTotal,
           status: 'overdue',
-        })!;
+        });
       }
-      return inv;
     });
 
-    setInvoices(updatedInvoices);
+    setMemoryInvoices(db.getTable<Invoice>('invoices'));
     showToast({
       type: 'info',
       message: `Late fees checked: ${appliedCount} overdue invoice(s) assessed under ${pack.name} regulations.`,
@@ -210,7 +253,7 @@ export const InvoicesView: React.FC = () => {
       voided_reason: voidReason.trim(),
     });
 
-    setInvoices(db.getTable<Invoice>('invoices'));
+    setMemoryInvoices(db.getTable<Invoice>('invoices'));
     setIsVoidOpen(false);
     showToast({
       type: 'info',
@@ -346,8 +389,7 @@ export const InvoicesView: React.FC = () => {
     const unpaidMinor = inv.total_minor - inv.amount_paid_minor;
     const invNumber = formatInvoiceNumber(inv.id, inv.period_start);
     const msg = `Hello ${tenant.name}, invoice ${invNumber} for ${formatMoney(inv.total_minor, pack)} is due on ${inv.due_date}. Balance remaining: ${formatMoney(unpaidMinor, pack)}. Please arrange payment.`;
-    const url = buildWhatsAppLink(tenant.phone, msg);
-    window.open(url, '_blank');
+    openWhatsAppMessage(tenant.phone, msg);
     showToast({ type: 'success', message: `WhatsApp invoice reminder opened for ${tenant.name}` });
   };
 
@@ -429,6 +471,7 @@ export const InvoicesView: React.FC = () => {
                 <th className="py-3.5 px-6 text-right">Late Fee</th>
                 <th className="py-3.5 px-6 text-right">Total</th>
                 <th className="py-3.5 px-6 text-right">Paid</th>
+                <th className="py-3.5 px-6 text-right">Credit Balance</th>
                 <th className="py-3.5 px-6 text-center">Status</th>
                 <th className="py-3.5 px-6 text-right">Actions</th>
               </tr>
@@ -440,6 +483,16 @@ export const InvoicesView: React.FC = () => {
                 const unit = units.find((u) => u.id === lease?.unit_id);
                 const formattedInvNo = formatInvoiceNumber(inv.id, inv.period_start);
                 const isSelected = selectedInvoiceIds.includes(inv.id);
+
+                const activeCredits = credits.filter(
+                  (c) =>
+                    !c.deleted_at &&
+                    !(c as any).deletedAt &&
+                    c.status === 'active' &&
+                    ((inv.lease_id && (c.lease_id === inv.lease_id || (c as any).leaseId === inv.lease_id)) ||
+                      (tenant && (c.tenant_id === tenant.id || (c as any).tenantId === tenant.id)))
+                );
+                const creditBalanceMinor = activeCredits.reduce((sum, c) => sum + (c.amount_minor || 0), 0);
 
                 const statusVariant =
                   inv.status === 'paid'
@@ -491,6 +544,15 @@ export const InvoicesView: React.FC = () => {
                     </td>
                     <td className="py-3 px-6 text-right font-mono font-bold number-tabular text-emerald-600">
                       {formatMoney(inv.amount_paid_minor, pack)}
+                    </td>
+                    <td className="py-3 px-6 text-right font-mono font-semibold">
+                      {creditBalanceMinor > 0 ? (
+                        <Badge variant="success" className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20 font-bold font-mono text-[11px]">
+                          {formatMoney(creditBalanceMinor, pack)}
+                        </Badge>
+                      ) : (
+                        <span className="text-[var(--text-subtle)] font-normal text-xs">—</span>
+                      )}
                     </td>
                     <td className="py-3 px-6 text-center">
                       <Badge variant={statusVariant}>{inv.status.replace('_', ' ').toUpperCase()}</Badge>
@@ -566,6 +628,122 @@ export const InvoicesView: React.FC = () => {
               })}
             </tbody>
           </table>
+        </div>
+      </Card>
+
+      {/* Recorded Payments & Settlement Ledger Table */}
+      <Card className="p-0 overflow-hidden">
+        <div className="p-6 border-b border-[var(--border-subtle)] flex items-center justify-between">
+          <div>
+            <h3 className="text-base font-bold text-[var(--text-primary)] tracking-tight">
+              Recorded Payments & Settlement Ledger
+            </h3>
+            <p className="text-xs text-[var(--text-secondary)] mt-0.5">
+              Real-time payment transactions and FIFO allocations across tenant accounts
+            </p>
+          </div>
+          <Badge variant="accent">{payments.length} Payments Logged</Badge>
+        </div>
+
+        <div className="overflow-x-auto">
+          {payments.length === 0 ? (
+            <div className="text-center py-10 text-xs text-[var(--text-secondary)]">
+              No payments recorded yet. Click &quot;Record Payment (FIFO)&quot; above to allocate a payment.
+            </div>
+          ) : (
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-[var(--border-subtle)] bg-[var(--bg-base)] text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider">
+                  <th className="py-3.5 px-6">Payment Reference</th>
+                  <th className="py-3.5 px-6">Resident & Unit</th>
+                  <th className="py-3.5 px-6">Linked Invoice</th>
+                  <th className="py-3.5 px-6">Date</th>
+                  <th className="py-3.5 px-6">Method</th>
+                  <th className="py-3.5 px-6 text-right">Amount Paid</th>
+                  <th className="py-3.5 px-6 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[var(--border-subtle)] text-sm">
+                {[...payments]
+                  .sort((a, b) => new Date(b.paid_at).getTime() - new Date(a.paid_at).getTime())
+                  .map((pmt) => {
+                    const inv = invoices.find((i) => i.id === pmt.invoice_id);
+                    const lease = leases.find((l) => l.id === inv?.lease_id);
+                    const tenant = tenants.find((t) => t.id === lease?.tenant_id);
+                    const unit = units.find((u) => u.id === lease?.unit_id);
+                    const prop = properties.find((p) => p.id === unit?.property_id);
+
+                    return (
+                      <tr key={pmt.id} className="h-14 hover:bg-[var(--bg-base)]/60 transition-colors">
+                        <td className="py-3.5 px-6 font-mono font-bold text-xs text-[var(--text-primary)]">
+                          {pmt.reference || `REF-${pmt.id.slice(0, 8)}`}
+                        </td>
+                        <td className="py-3.5 px-6">
+                          <span className="font-semibold text-xs text-[var(--text-primary)] block">
+                            {tenant ? tenant.name : 'Resident Account'}
+                          </span>
+                          <span className="text-[11px] text-[var(--text-secondary)] block">
+                            {unit ? unit.name : 'General Tenancy'} {prop ? `(${prop.name})` : ''}
+                          </span>
+                        </td>
+                        <td className="py-3.5 px-6 font-mono text-xs text-[var(--text-secondary)]">
+                          {inv ? formatInvoiceNumber(inv.id, inv.period_start) : 'FIFO Allocation'}
+                        </td>
+                        <td className="py-3.5 px-6 text-xs text-[var(--text-secondary)]">
+                          {new Date(pmt.paid_at).toLocaleDateString(undefined, {
+                            month: 'short',
+                            day: 'numeric',
+                            year: 'numeric',
+                          })}
+                        </td>
+                        <td className="py-3.5 px-6">
+                          <Badge variant="neutral">{pmt.method}</Badge>
+                        </td>
+                        <td className="py-3.5 px-6 text-right font-mono font-bold text-sm text-emerald-600 dark:text-emerald-400 number-tabular">
+                          +{formatMoney(pmt.amount_minor, pack)}
+                        </td>
+                        <td className="py-3.5 px-6 text-right">
+                          <div className="flex items-center justify-end gap-2">
+                            {inv && lease && tenant && unit && prop && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-8 text-xs px-2.5 gap-1.5"
+                                onClick={() => {
+                                  setActiveReceiptData({
+                                    invoice: inv,
+                                    lease,
+                                    tenant,
+                                    unit,
+                                    property: prop,
+                                    payment: pmt,
+                                  });
+                                }}
+                              >
+                                <Printer className="w-3.5 h-3.5" />
+                                <span>Receipt</span>
+                              </Button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setPaymentToDelete(pmt);
+                                setIsDeletePaymentModalOpen(true);
+                              }}
+                              className="h-8 w-8 rounded-lg border border-rose-200 dark:border-rose-900/50 bg-rose-50/50 dark:bg-rose-950/20 text-rose-600 hover:bg-rose-100 dark:hover:bg-rose-900/40 flex items-center justify-center transition-colors cursor-pointer"
+                              title="Delete payment and reverse invoice balance"
+                              aria-label="Delete payment"
+                            >
+                              <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+              </tbody>
+            </table>
+          )}
         </div>
       </Card>
 
@@ -760,18 +938,10 @@ export const InvoicesView: React.FC = () => {
                   <div className="flex items-center gap-2">
                     {tenant?.phone && (
                       <button
-                        onClick={() => window.open(buildWhatsAppLink(tenant.phone, msg), '_blank')}
-                        className="py-1 px-2.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 text-xs font-medium flex items-center gap-1 cursor-pointer transition-colors"
+                        onClick={() => openWhatsAppMessage(tenant.phone, msg)}
+                        className="py-1 px-2.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 text-xs font-medium flex items-center gap-1 cursor-pointer transition-colors"
                       >
                         <Send className="w-3.5 h-3.5" /> WhatsApp
-                      </button>
-                    )}
-                    {tenant?.email && (
-                      <button
-                        onClick={() => window.open(buildEmailLink(tenant.email, `Rent Invoice ${invNo} Reminder`, msg), '_blank')}
-                        className="py-1 px-2.5 rounded-lg bg-[var(--accent-subtle)] hover:bg-[var(--accent)]/20 text-[var(--accent)] text-xs font-medium flex items-center gap-1 cursor-pointer transition-colors"
-                      >
-                        <Mail className="w-3.5 h-3.5" /> Email
                       </button>
                     )}
                   </div>
@@ -786,6 +956,67 @@ export const InvoicesView: React.FC = () => {
             </span>
             <Button variant="outline" onClick={() => setIsBulkRemindersOpen(false)}>
               Done
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Modal: Delete Payment Confirmation */}
+      <Modal
+        isOpen={isDeletePaymentModalOpen}
+        onClose={() => {
+          setIsDeletePaymentModalOpen(false);
+          setPaymentToDelete(null);
+        }}
+        title="Delete Payment"
+        maxWidth="md"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-[var(--text-primary)]">
+            Are you sure you want to delete this payment?
+          </p>
+
+          {paymentToDelete && (
+            <div className="p-3.5 rounded-xl bg-[var(--bg-base)] border border-[var(--border-subtle)] space-y-1.5 text-xs font-mono">
+              <div className="flex justify-between text-[var(--text-secondary)]">
+                <span>Reference:</span>
+                <span className="font-bold text-[var(--text-primary)]">
+                  {paymentToDelete.reference || `REF-${paymentToDelete.id.slice(0, 8)}`}
+                </span>
+              </div>
+              <div className="flex justify-between text-[var(--text-secondary)]">
+                <span>Amount:</span>
+                <span className="font-bold text-rose-600">
+                  {formatMoney(paymentToDelete.amount_minor, pack)}
+                </span>
+              </div>
+              <div className="flex justify-between text-[var(--text-secondary)]">
+                <span>Method:</span>
+                <span>{paymentToDelete.method}</span>
+              </div>
+              <p className="pt-2 text-[11px] font-sans text-amber-600 dark:text-amber-400">
+                ⚠️ This will reverse the linked invoice balance and recalculate its settlement status (reopening the invoice if unpaid).
+              </p>
+            </div>
+          )}
+
+          <div className="flex justify-end gap-3 pt-3 border-t border-[var(--border-subtle)]">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setIsDeletePaymentModalOpen(false);
+                setPaymentToDelete(null);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="danger"
+              onClick={handleConfirmDeletePayment}
+            >
+              Yes, Delete
             </Button>
           </div>
         </div>

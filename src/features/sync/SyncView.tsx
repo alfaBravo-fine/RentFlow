@@ -21,22 +21,45 @@ import {
 
 export const SyncView: React.FC = () => {
   const user = useAuthStore((s) => s.user);
-  const { syncState, lastSyncedAt, syncError, syncNow } = useDriveSync();
+  const { syncState, lastSyncedAt, syncError, syncNow, restoreFromDrive, isRestoring } = useDriveSync();
   const [isManualSyncing, setIsManualSyncing] = useState(false);
+  const [isManualRestoring, setIsManualRestoring] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
   const pendingCount = syncEngine.getPendingCount();
 
   const handleManualSync = async () => {
     setIsManualSyncing(true);
-    setStatusMsg('Encrypting database snapshot with AES-256-GCM and uploading to drive.appdata...');
+    setStatusMsg('Encrypting full database snapshot + settings + themes with AES-256-GCM and uploading RentFlow_FullBackup.enc to drive.appdata...');
     try {
       await syncNow();
-      setStatusMsg('Successfully synchronized to Google Drive (drive.appdata)');
+      setStatusMsg('Successfully synchronized RentFlow_FullBackup.enc to Google Drive (drive.appdata)');
     } catch (err: any) {
       setStatusMsg(err.message || 'Sync failed');
     } finally {
       setIsManualSyncing(false);
+    }
+  };
+
+  const handleRestoreFromDrive = async () => {
+    const confirmed = window.confirm(
+      'Are you sure you want to restore from Google Drive? This will pull RentFlow_FullBackup.enc, decrypt all records, wipe current local data, and restore all properties, units, tenants, leases, invoices, payments, expenses, settings, and themes.'
+    );
+    if (!confirmed) return;
+
+    setIsManualRestoring(true);
+    setStatusMsg('Downloading RentFlow_FullBackup.enc from Google Drive, decrypting AES-256-GCM, and restoring all database tables, themes, and settings...');
+    try {
+      const res = await restoreFromDrive();
+      if (res && res.restored) {
+        setStatusMsg(`Successfully restored full portfolio (${res.totalRecords || 0} records across tables), custom themes, and settings from Google Drive!`);
+      } else {
+        setStatusMsg(res?.message || 'Restore completed (no backup found or already up to date).');
+      }
+    } catch (err: any) {
+      setStatusMsg(`Restore error: ${err.message || 'Failed to restore from Google Drive'}`);
+    } finally {
+      setIsManualRestoring(false);
     }
   };
 
@@ -98,10 +121,20 @@ export const SyncView: React.FC = () => {
             <span>Export CSV</span>
           </Button>
           <Button
+            variant="outline"
+            size="sm"
+            onClick={handleRestoreFromDrive}
+            disabled={isManualSyncing || isManualRestoring || isRestoring || syncState === 'syncing'}
+            className="gap-2 border-[var(--accent)]/40 text-[var(--accent)] hover:bg-[var(--accent-subtle)]/30"
+          >
+            <Download className={`w-3.5 h-3.5 ${isManualRestoring || isRestoring ? 'animate-bounce' : ''}`} />
+            <span>{isManualRestoring || isRestoring ? 'Restoring from Drive...' : 'Restore from Drive'}</span>
+          </Button>
+          <Button
             variant="primary"
             size="sm"
             onClick={handleManualSync}
-            disabled={isManualSyncing || syncState === 'syncing'}
+            disabled={isManualSyncing || isManualRestoring || isRestoring || syncState === 'syncing'}
             className="gap-2"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isManualSyncing || syncState === 'syncing' ? 'animate-spin' : ''}`} />
@@ -178,9 +211,25 @@ export const SyncView: React.FC = () => {
             <p><strong>Auto-Trigger:</strong> 5s Debounce after DB writes</p>
             <p><strong>Local Queue:</strong> {pendingCount} recorded mutations</p>
           </div>
-          <Button variant="outline" className="w-full" onClick={handleManualSync}>
-            Force Immediate Cloud Push
-          </Button>
+          <div className="flex flex-col gap-2 pt-1">
+            <Button
+              variant="outline"
+              className="w-full justify-center text-xs"
+              onClick={handleManualSync}
+              disabled={isManualSyncing || isManualRestoring || isRestoring || syncState === 'syncing'}
+            >
+              Force Immediate Cloud Push
+            </Button>
+            <Button
+              variant="outline"
+              className="w-full justify-center text-xs border-[var(--accent)]/40 text-[var(--accent)] hover:bg-[var(--accent-subtle)]/30 gap-1.5"
+              onClick={handleRestoreFromDrive}
+              disabled={isManualSyncing || isManualRestoring || isRestoring || syncState === 'syncing'}
+            >
+              <Download className={`w-3.5 h-3.5 ${isManualRestoring || isRestoring ? 'animate-bounce' : ''}`} />
+              <span>Restore Portfolio from Drive</span>
+            </Button>
+          </div>
         </Card>
 
         <Card className="space-y-4 rounded-2xl">

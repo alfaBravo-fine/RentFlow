@@ -5,11 +5,15 @@ import { usePack } from '../../countries/usePack';
 import { formatMoney } from '../../lib/money';
 import { generateUUID } from '../../lib/uuid';
 import { useToast } from '../../components/toast/ToastContext';
-import { Card, CardHeader, CardTitle } from '../../components/ui/Card';
+import { usePrint } from '../../components/print/PrintContext';
+import { OwnerStatementPrintable } from '../../components/print/OwnerStatementPrintable';
+import { OwnerStatementModal } from './OwnerStatementModal';
+import { Card } from '../../components/ui/Card';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
 import { Input, Select } from '../../components/ui/Input';
 import { Modal } from '../../components/ui/Modal';
+import { DestructiveConfirmationModal } from '../../components/ui/DestructiveConfirmationModal';
 import {
   Users,
   Plus,
@@ -30,6 +34,7 @@ import {
 export const OwnersView: React.FC = () => {
   const pack = usePack();
   const { showToast } = useToast();
+  const { printReport } = usePrint();
 
   const [owners, setOwners] = useState<Owner[]>(() =>
     db.getTable<Owner>('owners').filter((o) => !o.deleted_at)
@@ -234,29 +239,29 @@ export const OwnersView: React.FC = () => {
                   </Badge>
                 </div>
 
-                {/* Financial Summary Box */}
-                <div className="p-3 rounded-xl bg-[var(--bg-base)] border border-[var(--border-subtle)] space-y-1.5 text-xs">
+                {/* Financial Summary */}
+                <div className="pt-3 border-t border-[var(--border-subtle)] space-y-2 text-xs">
                   <div className="flex items-center justify-between">
-                    <span className="text-[var(--text-secondary)]">Rent Collected:</span>
-                    <span className="font-mono font-semibold text-emerald-600">
+                    <span className="text-[var(--text-secondary)]">Rent Collected</span>
+                    <span className="font-mono font-semibold text-emerald-600 tabular-nums">
                       {formatMoney(rentCollectedMinor, pack)}
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
-                    <span className="text-[var(--text-secondary)]">Agency Commission:</span>
-                    <span className="font-mono text-[var(--text-primary)]">
+                    <span className="text-[var(--text-secondary)]">Agency Commission</span>
+                    <span className="font-mono text-[var(--text-primary)] tabular-nums">
                       -{formatMoney(commissionMinor, pack)}
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
-                    <span className="text-[var(--text-secondary)]">Operating Expenses:</span>
-                    <span className="font-mono text-rose-600">
+                    <span className="text-[var(--text-secondary)]">Operating Expenses</span>
+                    <span className="font-mono text-rose-600 tabular-nums">
                       -{formatMoney(totalExpensesMinor, pack)}
                     </span>
                   </div>
-                  <div className="flex items-center justify-between pt-1.5 border-t border-[var(--border-subtle)] font-bold">
-                    <span className="text-[var(--text-primary)]">Net Owner Payout:</span>
-                    <span className="font-mono text-sm text-[var(--accent)]">
+                  <div className="flex items-center justify-between pt-2 border-t border-[var(--border-subtle)] font-bold">
+                    <span className="text-[var(--text-primary)]">Net Owner Payout</span>
+                    <span className="font-mono text-sm text-[var(--accent)] tabular-nums">
                       {formatMoney(netPayoutMinor, pack)}
                     </span>
                   </div>
@@ -384,135 +389,52 @@ export const OwnersView: React.FC = () => {
         </form>
       </Modal>
 
-      {/* Modal: Owner Monthly Statement with Clean Print Layout */}
-      <Modal
-        isOpen={!!statementOwner}
-        onClose={() => setStatementOwner(null)}
-        title="Owner Disbursement Statement"
-        maxWidth="lg"
-      >
-        {statementOwner && (() => {
-          const {
-            ownerProps,
-            rentCollectedMinor,
-            commissionMinor,
-            totalExpensesMinor,
-            netPayoutMinor,
-          } = calculateOwnerFinancials(statementOwner.id);
+      {/* Modal: Redesigned Owner Disbursement Statement */}
+      {statementOwner && (() => {
+        const financials = calculateOwnerFinancials(statementOwner.id);
+        return (
+          <OwnerStatementModal
+            isOpen={!!statementOwner}
+            onClose={() => setStatementOwner(null)}
+            orgName={org.name}
+            owner={statementOwner}
+            statementMonth={statementMonth}
+            onChangeStatementMonth={setStatementMonth}
+            ownerProps={financials.ownerProps}
+            rentCollectedMinor={financials.rentCollectedMinor}
+            commissionMinor={financials.commissionMinor}
+            totalExpensesMinor={financials.totalExpensesMinor}
+            netPayoutMinor={financials.netPayoutMinor}
+            pack={pack}
+            onPrintStatement={() => {
+              printReport(
+                <OwnerStatementPrintable
+                  orgName={org.name}
+                  statementOwner={statementOwner}
+                  statementMonth={statementMonth}
+                  ownerProps={financials.ownerProps}
+                  rentCollectedMinor={financials.rentCollectedMinor}
+                  commissionMinor={financials.commissionMinor}
+                  totalExpensesMinor={financials.totalExpensesMinor}
+                  netPayoutMinor={financials.netPayoutMinor}
+                  pack={pack}
+                />
+              );
+            }}
+          />
+        );
+      })()}
 
-          return (
-            <div className="space-y-6">
-              {/* Header Box */}
-              <div className="flex items-center justify-between pb-4 border-b border-[var(--border-subtle)]">
-                <div>
-                  <h3 className="text-base font-bold text-[var(--text-primary)]">
-                    {org.name}
-                  </h3>
-                  <p className="text-xs text-[var(--text-secondary)]">
-                    Owner Statement &bull; Period: {statementMonth}
-                  </p>
-                </div>
-                <div className="text-right">
-                  <span className="text-xs font-semibold text-[var(--text-primary)] block">
-                    {statementOwner.name}
-                  </span>
-                  <span className="text-[11px] text-[var(--text-secondary)]">
-                    Payout: {statementOwner.payout_details || 'ACH Bank Transfer'}
-                  </span>
-                </div>
-              </div>
-
-              {/* Breakdown Table */}
-              <div className="rounded-xl border border-[var(--border-subtle)] overflow-hidden">
-                <table className="w-full text-left text-xs border-collapse">
-                  <thead className="bg-[var(--bg-base)] text-[var(--text-secondary)] uppercase">
-                    <tr>
-                      <th className="py-2.5 px-4 font-semibold">Description</th>
-                      <th className="py-2.5 px-4 font-semibold text-right">Calculation Basis</th>
-                      <th className="py-2.5 px-4 font-semibold text-right">Amount</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[var(--border-subtle)]">
-                    <tr>
-                      <td className="py-3 px-4 font-medium text-[var(--text-primary)]">
-                        Gross Rental Revenue Collected
-                      </td>
-                      <td className="py-3 px-4 text-right text-[var(--text-secondary)] font-mono">
-                        {ownerProps.map((p) => p.name).join(', ')}
-                      </td>
-                      <td className="py-3 px-4 text-right font-mono font-bold text-emerald-600">
-                        {formatMoney(rentCollectedMinor, pack)}
-                      </td>
-                    </tr>
-                    <tr>
-                      <td className="py-3 px-4 font-medium text-[var(--text-primary)]">
-                        Agency Management Commission
-                      </td>
-                      <td className="py-3 px-4 text-right text-[var(--text-secondary)]">
-                        {statementOwner.commission_value}{statementOwner.commission_type === 'percentage' ? '%' : ''} Fee
-                      </td>
-                      <td className="py-3 px-4 text-right font-mono text-rose-600">
-                        -{formatMoney(commissionMinor, pack)}
-                      </td>
-                    </tr>
-                    <tr>
-                      <td className="py-3 px-4 font-medium text-[var(--text-primary)]">
-                        Property Repairs & Operating Expenses
-                      </td>
-                      <td className="py-3 px-4 text-right text-[var(--text-secondary)] font-mono">
-                        Itemized receipts logged
-                      </td>
-                      <td className="py-3 px-4 text-right font-mono text-rose-600">
-                        -{formatMoney(totalExpensesMinor, pack)}
-                      </td>
-                    </tr>
-                    <tr className="bg-[var(--bg-base)] font-bold text-sm">
-                      <td className="py-3.5 px-4 text-[var(--text-primary)]" colSpan={2}>
-                        Total Net Payout to Owner
-                      </td>
-                      <td className="py-3.5 px-4 text-right font-mono text-base text-[var(--accent)]">
-                        {formatMoney(netPayoutMinor, pack)}
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-
-              <div className="flex items-center justify-between pt-3 border-t border-[var(--border-subtle)]">
-                <Button variant="outline" onClick={() => setStatementOwner(null)}>
-                  Close
-                </Button>
-                <Button variant="primary" onClick={() => window.print()} className="gap-2">
-                  <Printer className="w-4 h-4" />
-                  <span>Print Formal Statement</span>
-                </Button>
-              </div>
-            </div>
-          );
-        })()}
-      </Modal>
-
-      {/* Modal: Delete Confirmation */}
-      <Modal
+      {/* Destructive Action Confirmation */}
+      <DestructiveConfirmationModal
         isOpen={!!deletingOwner}
         onClose={() => setDeletingOwner(null)}
-        title="Archive Owner Profile?"
-        maxWidth="md"
-      >
-        <div className="space-y-4">
-          <p className="text-sm text-[var(--text-secondary)]">
-            Are you sure you want to archive <strong>{deletingOwner?.name}</strong>? Assigned properties will remain active in the system.
-          </p>
-          <div className="flex justify-end gap-3 pt-3 border-t border-[var(--border-subtle)]">
-            <Button variant="outline" onClick={() => setDeletingOwner(null)}>
-              Cancel
-            </Button>
-            <Button variant="danger" onClick={handleConfirmDelete}>
-              Confirm Archive
-            </Button>
-          </div>
-        </div>
-      </Modal>
+        onConfirm={handleConfirmDelete}
+        title="Delete Owner Profile"
+        itemName={deletingOwner?.name || ''}
+        itemType="Owner"
+        warningDetails="Assigned properties will remain active in the system."
+      />
     </div>
   );
 };

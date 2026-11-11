@@ -14,40 +14,16 @@ class SyncEngine {
 
   public getPendingCount(): number {
     try {
-      const raw = localStorage.getItem('rentflow_db_v1_sync_queue');
-      const queue: SyncQueueItem[] = raw ? JSON.parse(raw) : [];
+      const queue = db.getRawTable<SyncQueueItem>('sync_queue');
       return queue.filter((item) => !item.synced).length;
-    } catch (e) {
+    } catch {
       return 0;
     }
   }
 
   public async exportEncryptedSnapshot(): Promise<EncryptedPayload> {
-    const allTables = [
-      'organizations',
-      'users',
-      'workspaces',
-      'owners',
-      'properties',
-      'units',
-      'tenants',
-      'leases',
-      'invoices',
-      'payments',
-      'credits',
-      'deposits',
-      'maintenance_requests',
-      'vendors',
-      'expenses',
-      'documents',
-      'reminders',
-      'audit_log',
-    ];
-
-    const backupData: Record<string, any[]> = {};
-    for (const table of allTables) {
-      backupData[table] = db.getTable(table);
-    }
+    await db.flush();
+    const backupData = db.exportAllData();
 
     const payloadString = JSON.stringify({
       version: 1,
@@ -63,13 +39,11 @@ class SyncEngine {
       const decryptedString = await decryptData(payload, this.passphrase);
       const parsed = JSON.parse(decryptedString);
 
-      if (!parsed.data) throw new Error('Invalid backup file payload');
-
-      for (const [tableName, rows] of Object.entries(parsed.data)) {
-        if (Array.isArray(rows)) {
-          localStorage.setItem(`rentflow_db_v1_${tableName}`, JSON.stringify(rows));
-        }
+      if (!parsed.data || typeof parsed.data !== 'object') {
+        throw new Error('Invalid backup file payload');
       }
+
+      await db.importAllDataAsync(parsed.data);
       return true;
     } catch (e) {
       console.error('Failed to import backup snapshot:', e);
@@ -79,10 +53,7 @@ class SyncEngine {
 
   public markQueueSynced() {
     try {
-      const raw = localStorage.getItem('rentflow_db_v1_sync_queue');
-      const queue: SyncQueueItem[] = raw ? JSON.parse(raw) : [];
-      const updated = queue.map((q) => ({ ...q, synced: true }));
-      localStorage.setItem('rentflow_db_v1_sync_queue', JSON.stringify(updated));
+      db.markSyncQueueSynced();
     } catch (e) {
       console.error('Error marking queue synced', e);
     }

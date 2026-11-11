@@ -160,6 +160,7 @@ export interface Invoice {
   currency_code: string;
   status: 'unpaid' | 'partially_paid' | 'paid' | 'overdue' | 'voided';
   voided_reason?: string | null;
+  line_items_json?: string | null;
   updated_at: number;
   device_id: string;
   deleted_at?: number | null;
@@ -182,11 +183,18 @@ export interface Payment {
 
 export interface Credit {
   id: string;
-  lease_id: string;
+  tenant_id?: string;
+  tenantId?: string;
+  lease_id?: string;
+  leaseId?: string;
   amount_minor: number;
-  currency_code: string;
-  reason: string;
+  amount?: number;
+  currency_code?: string;
+  reason?: string;
   applied_invoice_id?: string | null;
+  status: 'active' | 'used' | 'partially_used' | 'refunded';
+  created_at?: number;
+  createdAt?: number;
   updated_at: number;
   device_id: string;
   deleted_at?: number | null;

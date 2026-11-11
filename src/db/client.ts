@@ -9,10 +9,16 @@ import {
   tauriDbDeleteUnitCascading,
   tauriDbDeleteInvoiceCascading,
   tauriDbDeleteTenantCascading,
+  tauriDbImportAll,
 } from '../lib/tauri/bridge';
 import {
-  Organization,
-  User,
+  ALL_DB_TABLES,
+  dexieDb,
+  isIndexedDbAvailable,
+  migrateLegacyLocalStorageToDexie,
+  RentFlowDexieDatabase,
+} from './dexieDb';
+import {
   Property,
   Unit,
   Tenant,
@@ -20,40 +26,108 @@ import {
   Invoice,
   Payment,
   Credit,
-  Deposit,
   MaintenanceRequest,
-  Vendor,
-  Expense,
   AuditLog,
   SyncQueueItem,
 } from './schema';
 
-const DB_PREFIX = 'rentflow_db_v1_';
-
-function getStorageTable<T>(tableName: string): T[] {
-  try {
-    const raw = localStorage.getItem(`${DB_PREFIX}${tableName}`);
-    return raw ? JSON.parse(raw) : [];
-  } catch (e) {
-    console.error(`Error reading ${tableName} from local storage`, e);
-    return [];
+function normalizeRecord<T extends Record<string, any>>(row: T): T {
+  if (!row || typeof row !== 'object') return row;
+  const normalized: any = { ...row };
+  if ('deletedAt' in normalized) {
+    normalized.deleted_at = normalized.deleted_at ?? normalized.deletedAt ?? null;
+    delete normalized.deletedAt;
   }
-}
-
-function setStorageTable<T>(tableName: string, items: T[]): void {
-  try {
-    localStorage.setItem(`${DB_PREFIX}${tableName}`, JSON.stringify(items));
-  } catch (e) {
-    console.error(`Error writing ${tableName} to local storage`, e);
+  if (!normalized.name && (normalized.unit_number || normalized.unitNumber)) {
+    normalized.name = normalized.unit_number || normalized.unitNumber;
   }
+  return normalized as T;
 }
 
 export class DBClient {
   private deviceId: string;
   private writeListeners: Array<() => void> = [];
+  private store: Map<string, any[]> = new Map();
+  private dexieInstance: RentFlowDexieDatabase;
+  private writeChain: Promise<void> = Promise.resolve();
+  private hydrated = false;
 
-  constructor() {
+  constructor(customDexie?: RentFlowDexieDatabase) {
     this.deviceId = getDeviceId();
+    this.dexieInstance = customDexie || dexieDb;
+    for (const tableName of ALL_DB_TABLES) {
+      this.store.set(tableName, []);
+    }
+  }
+
+  public isHydrated(): boolean {
+    return this.hydrated;
+  }
+
+  private getMemoryTable<T>(tableName: string): T[] {
+    const existing = this.store.get(tableName);
+    if (existing) return existing as T[];
+    const empty: T[] = [];
+    this.store.set(tableName, empty);
+    return empty;
+  }
+
+  private setMemoryTable<T>(tableName: string, items: T[]): void {
+    this.store.set(tableName, [...items]);
+  }
+
+  private enqueueDexieWork(task: () => Promise<void>): Promise<void> {
+    if (!isIndexedDbAvailable()) {
+      return Promise.resolve();
+    }
+    const next = this.writeChain
+      .then(async () => {
+        await this.dexieInstance.open();
+        await task();
+      })
+      .catch((err) => {
+        console.error('[DexieDB] Transaction error:', err);
+        throw err;
+      });
+    // Keep writeChain alive even if an individual transaction rejects
+    this.writeChain = next.catch(() => {});
+    return next;
+  }
+
+  /**
+   * Waits for all pending IndexedDB transactions to settle.
+   */
+  public async flush(): Promise<void> {
+    await this.writeChain;
+  }
+
+  /**
+   * Hydrates the in-memory reactive store from IndexedDB (Dexie.js),
+   * running a one-time atomic migration from legacy localStorage if needed.
+   */
+  public async hydrateFromDexie(): Promise<void> {
+    if (!isIndexedDbAvailable()) {
+      this.hydrated = true;
+      return;
+    }
+
+    await this.dexieInstance.open();
+    await migrateLegacyLocalStorageToDexie(this.dexieInstance);
+
+    const loadedEntries = await Promise.all(
+      ALL_DB_TABLES.map(async (tableName) => {
+        const rows = await this.dexieInstance.table(tableName).toArray();
+        return [tableName, rows.map((r) => normalizeRecord(r))] as const;
+      })
+    );
+
+    for (const [tableName, rows] of loadedEntries) {
+      this.store.set(tableName, rows);
+    }
+
+    this.hydrated = true;
+    this.syncUnitOccupancy();
+    this.notifyWrite();
   }
 
   // Reactive DB write subscription
@@ -74,12 +148,16 @@ export class DBClient {
     });
   }
 
-  // --- Generic Helpers ---
+  // --- Audit & Sync Queue Builders ---
 
-  private enqueueSync(tableName: string, recordId: string, op: 'insert' | 'update' | 'delete', payload: any) {
-    const queue = getStorageTable<SyncQueueItem>('sync_queue');
-    const newItem: SyncQueueItem = {
-      id: Date.now() + Math.floor(Math.random() * 1000),
+  private buildSyncItem(
+    tableName: string,
+    recordId: string,
+    op: 'insert' | 'update' | 'delete',
+    payload: any
+  ): SyncQueueItem {
+    return {
+      id: Date.now() + Math.floor(Math.random() * 10000),
       table_name: tableName,
       record_id: recordId,
       op,
@@ -87,13 +165,16 @@ export class DBClient {
       synced: false,
       created_at: Date.now(),
     };
-    queue.push(newItem);
-    setStorageTable('sync_queue', queue);
   }
 
-  public recordAudit(action: string, entityType: string, entityId: string, before?: any, after?: any) {
-    const logs = getStorageTable<AuditLog>('audit_log');
-    const entry: AuditLog = {
+  private buildAuditEntry(
+    action: string,
+    entityType: string,
+    entityId: string,
+    before?: any,
+    after?: any
+  ): AuditLog {
+    return {
       id: generateUUID(),
       org_id: 'default_org',
       user_id: 'local_user',
@@ -104,325 +185,689 @@ export class DBClient {
       after_json: after ? JSON.stringify(after) : null,
       created_at: Date.now(),
     };
-    logs.unshift(entry);
-    setStorageTable('audit_log', logs);
   }
 
-  // --- CRUD Operations ---
+  public recordAudit(action: string, entityType: string, entityId: string, before?: any, after?: any) {
+    const logs = this.getMemoryTable<AuditLog>('audit_log');
+    const entry = this.buildAuditEntry(action, entityType, entityId, before, after);
+    logs.unshift(entry);
+    this.setMemoryTable('audit_log', logs);
+    void this.enqueueDexieWork(async () => {
+      await this.dexieInstance.audit_log.put(entry);
+    }).catch(() => {});
+  }
 
-  public getTable<T extends { deleted_at?: number | null; deletedAt?: number | null }>(tableName: string): T[] {
-    const rows = getStorageTable<T>(tableName);
+  public markSyncQueueSynced(): void {
+    const queue = this.getMemoryTable<SyncQueueItem>('sync_queue');
+    const updated = queue.map((item) => ({ ...item, synced: true }));
+    this.setMemoryTable('sync_queue', updated);
+    void this.enqueueDexieWork(async () => {
+      await this.dexieInstance.sync_queue.bulkPut(updated);
+    }).catch(() => {});
+  }
+
+  // --- Read Operations ---
+
+  public getRawTable<T>(tableName: string): T[] {
+    return [...this.getMemoryTable<T>(tableName)];
+  }
+
+  public getTable<T extends { deleted_at?: number | null; deletedAt?: number | null }>(
+    tableName: string
+  ): T[] {
+    const rows = this.getMemoryTable<T>(tableName);
     return rows.filter((r) => !r.deleted_at && !(r as any).deletedAt);
   }
 
-  public getItem<T extends { id: string; deleted_at?: number | null; deletedAt?: number | null }>(tableName: string, id: string): T | null {
-    const rows = getStorageTable<T>(tableName);
+  public getItem<T extends { id: string; deleted_at?: number | null; deletedAt?: number | null }>(
+    tableName: string,
+    id: string
+  ): T | null {
+    const rows = this.getMemoryTable<T>(tableName);
     const found = rows.find((r) => r.id === id);
     if (!found || found.deleted_at || (found as any).deletedAt) return null;
     return found;
   }
 
+  // --- Write Operations (Dexie.js + Optional Tauri SQLite Mirror) ---
+
   public insertItem<T extends { id: string; updated_at?: number; device_id?: string }>(
     tableName: string,
     item: Omit<T, 'updated_at' | 'device_id'> & Partial<Pick<T, 'updated_at' | 'device_id'>>
   ): T {
-    const rows = getStorageTable<T>(tableName);
-    const stamped = {
+    const rows = [...this.getMemoryTable<T>(tableName)];
+    const stamped = normalizeRecord({
       ...item,
       updated_at: Date.now(),
       device_id: this.deviceId,
       deleted_at: null,
-      deletedAt: null,
-    } as unknown as T;
+    }) as unknown as T;
 
-    rows.push(stamped);
-    setStorageTable(tableName, rows);
-    this.enqueueSync(tableName, stamped.id, 'insert', stamped);
-    this.recordAudit('CREATE', tableName, stamped.id, null, stamped);
-    if (isTauri()) {
-      tauriDbInsertItem(tableName, stamped).catch((err) => console.warn('[Tauri SQLCipher] insert error:', err));
+    const existingIdx = rows.findIndex((r) => r.id === stamped.id);
+    if (existingIdx >= 0) {
+      rows[existingIdx] = stamped;
+    } else {
+      rows.push(stamped);
     }
+    this.setMemoryTable(tableName, rows);
+
+    const syncItem = this.buildSyncItem(tableName, stamped.id, 'insert', stamped);
+    const syncQueue = [...this.getMemoryTable<SyncQueueItem>('sync_queue'), syncItem];
+    this.setMemoryTable('sync_queue', syncQueue);
+
+    const auditEntry = this.buildAuditEntry('CREATE', tableName, stamped.id, null, stamped);
+    const auditLogs = [auditEntry, ...this.getMemoryTable<AuditLog>('audit_log')];
+    this.setMemoryTable('audit_log', auditLogs);
+
+    void this.enqueueDexieWork(async () => {
+      const targetTable = this.dexieInstance.table(tableName);
+      await this.dexieInstance.transaction(
+        'rw',
+        [targetTable, this.dexieInstance.sync_queue, this.dexieInstance.audit_log],
+        async () => {
+          await targetTable.put(stamped);
+          await this.dexieInstance.sync_queue.put(syncItem);
+          await this.dexieInstance.audit_log.put(auditEntry);
+        }
+      );
+    }).catch(() => {});
+
+    if (isTauri()) {
+      tauriDbInsertItem(tableName, stamped).catch((err) =>
+        console.warn('[Tauri SQLite] insert error:', err)
+      );
+    }
+
+    if (tableName === 'leases') {
+      const unitId = (stamped as any).unit_id;
+      if (unitId) {
+        this.syncUnitOccupancy(unitId);
+      }
+    }
+
     this.notifyWrite();
     return stamped;
   }
 
-  public updateItem<T extends { id: string; updated_at?: number; device_id?: string }>(tableName: string, id: string, patch: Partial<T>): T | null {
-    const rows = getStorageTable<T>(tableName);
+  public updateItem<T extends { id: string; updated_at?: number; device_id?: string }>(
+    tableName: string,
+    id: string,
+    patch: Partial<T>
+  ): T | null {
+    const rows = [...this.getMemoryTable<T>(tableName)];
     const index = rows.findIndex((r) => r.id === id);
     if (index === -1) return null;
 
     const before = rows[index];
-    const updated: T = {
+    const updated = normalizeRecord({
       ...before,
       ...patch,
       updated_at: Date.now(),
       device_id: this.deviceId,
-    };
+    }) as T;
 
     rows[index] = updated;
-    setStorageTable(tableName, rows);
-    this.enqueueSync(tableName, id, 'update', updated);
-    this.recordAudit('UPDATE', tableName, id, before, updated);
+    this.setMemoryTable(tableName, rows);
+
+    const syncItem = this.buildSyncItem(tableName, id, 'update', updated);
+    const syncQueue = [...this.getMemoryTable<SyncQueueItem>('sync_queue'), syncItem];
+    this.setMemoryTable('sync_queue', syncQueue);
+
+    const auditEntry = this.buildAuditEntry('UPDATE', tableName, id, before, updated);
+    const auditLogs = [auditEntry, ...this.getMemoryTable<AuditLog>('audit_log')];
+    this.setMemoryTable('audit_log', auditLogs);
+
+    void this.enqueueDexieWork(async () => {
+      const targetTable = this.dexieInstance.table(tableName);
+      await this.dexieInstance.transaction(
+        'rw',
+        [targetTable, this.dexieInstance.sync_queue, this.dexieInstance.audit_log],
+        async () => {
+          await targetTable.put(updated);
+          await this.dexieInstance.sync_queue.put(syncItem);
+          await this.dexieInstance.audit_log.put(auditEntry);
+        }
+      );
+    }).catch(() => {});
+
     if (isTauri()) {
-      tauriDbUpdateItem(tableName, id, updated).catch((err) => console.warn('[Tauri SQLCipher] update error:', err));
+      tauriDbUpdateItem(tableName, id, updated).catch((err) =>
+        console.warn('[Tauri SQLite] update error:', err)
+      );
     }
+
+    if (tableName === 'leases') {
+      const prevUnitId = (before as any).unit_id;
+      const newUnitId = (updated as any).unit_id;
+      if (prevUnitId) this.syncUnitOccupancy(prevUnitId);
+      if (newUnitId && newUnitId !== prevUnitId) this.syncUnitOccupancy(newUnitId);
+    }
+
     this.notifyWrite();
     return updated;
   }
 
-  public softDeleteItem<T extends { id: string; deleted_at?: number | null; deletedAt?: number | null; updated_at?: number; device_id?: string }>(tableName: string, id: string): boolean {
-    const rows = getStorageTable<T>(tableName);
+  public softDeleteItem<
+    T extends {
+      id: string;
+      deleted_at?: number | null;
+      deletedAt?: number | null;
+      updated_at?: number;
+      device_id?: string;
+    },
+  >(tableName: string, id: string): boolean {
+    const rows = [...this.getMemoryTable<T>(tableName)];
     const index = rows.findIndex((r) => r.id === id);
     if (index === -1) return false;
 
     const before = rows[index];
     const now = Date.now();
-    const updated: T = {
+    const updated = normalizeRecord({
       ...before,
       deleted_at: now,
-      deletedAt: now,
       updated_at: now,
       device_id: this.deviceId,
-    };
+    }) as T;
 
     rows[index] = updated;
-    setStorageTable(tableName, rows);
-    this.enqueueSync(tableName, id, 'delete', updated);
-    this.recordAudit('DELETE', tableName, id, before, updated);
+    this.setMemoryTable(tableName, rows);
+
+    const syncItem = this.buildSyncItem(tableName, id, 'delete', updated);
+    const syncQueue = [...this.getMemoryTable<SyncQueueItem>('sync_queue'), syncItem];
+    this.setMemoryTable('sync_queue', syncQueue);
+
+    const auditEntry = this.buildAuditEntry('DELETE', tableName, id, before, updated);
+    const auditLogs = [auditEntry, ...this.getMemoryTable<AuditLog>('audit_log')];
+    this.setMemoryTable('audit_log', auditLogs);
+
+    void this.enqueueDexieWork(async () => {
+      const targetTable = this.dexieInstance.table(tableName);
+      await this.dexieInstance.transaction(
+        'rw',
+        [targetTable, this.dexieInstance.sync_queue, this.dexieInstance.audit_log],
+        async () => {
+          await targetTable.put(updated);
+          await this.dexieInstance.sync_queue.put(syncItem);
+          await this.dexieInstance.audit_log.put(auditEntry);
+        }
+      );
+    }).catch(() => {});
+
     if (isTauri()) {
-      tauriDbDeleteItem(tableName, id).catch((err) => console.warn('[Tauri SQLCipher] delete error:', err));
+      tauriDbDeleteItem(tableName, id).catch((err) =>
+        console.warn('[Tauri SQLite] delete error:', err)
+      );
     }
+
+    if (tableName === 'leases') {
+      const unitId = (before as any).unit_id;
+      if (unitId) this.syncUnitOccupancy(unitId);
+    }
+
     this.notifyWrite();
     return true;
   }
 
-  // --- Cascading Soft Deletes ---
+  /**
+   * Cascading unit occupancy synchronization.
+   * If a unit has at least one active, non-deleted lease, its status is set to 'occupied'.
+   * If a unit has no active leases and is not in 'maintenance', its status is set to 'vacant'.
+   */
+  public syncUnitOccupancy(targetUnitId?: string): void {
+    const leases = this.getTable<Lease>('leases');
+    const units = [...this.getMemoryTable<Unit>('units')];
+    let hasChanges = false;
 
-  public deletePropertyCascading(propertyId: string): boolean {
-    const now = Date.now();
-
-    // 1. Soft-delete property
-    this.softDeleteItem<Property>('properties', propertyId);
-
-    // 2. Find and soft-delete units
-    const units = getStorageTable<Unit>('units');
-    const unitIds: string[] = [];
-    units.forEach((u) => {
-      if (u.property_id === propertyId && !u.deleted_at && !(u as any).deletedAt) {
-        unitIds.push(u.id);
-        u.deleted_at = now;
-        (u as any).deletedAt = now;
-        u.updated_at = now;
+    const updateStatus = (u: Unit, targetStatus: 'occupied' | 'vacant') => {
+      if (u.status === targetStatus || u.status === 'maintenance') return;
+      const updated: Unit = {
+        ...u,
+        status: targetStatus,
+        updated_at: Date.now(),
+        device_id: this.deviceId,
+      };
+      const idx = units.findIndex((item) => item.id === u.id);
+      if (idx !== -1) {
+        units[idx] = updated;
+        hasChanges = true;
       }
-    });
-    setStorageTable('units', units);
+      void this.enqueueDexieWork(async () => {
+        await this.dexieInstance.units.put(updated);
+      }).catch(() => {});
+    };
 
-    // 3. Find and soft-delete leases for these units
-    const leases = getStorageTable<Lease>('leases');
-    const leaseIds: string[] = [];
-    leases.forEach((l) => {
-      if (unitIds.includes(l.unit_id) && !l.deleted_at && !(l as any).deletedAt) {
-        leaseIds.push(l.id);
-        l.deleted_at = now;
-        (l as any).deletedAt = now;
-        l.updated_at = now;
+    if (targetUnitId) {
+      const unit = units.find(
+        (u) => u.id === targetUnitId && !u.deleted_at && !(u as any).deletedAt
+      );
+      if (unit) {
+        const hasActiveLease = leases.some(
+          (l) => l.unit_id === targetUnitId && l.status === 'active' && !l.deleted_at && !(l as any).deletedAt
+        );
+        updateStatus(unit, hasActiveLease ? 'occupied' : 'vacant');
       }
-    });
-    setStorageTable('leases', leases);
-
-    // 4. Find and soft-delete invoices for these leases
-    const invoices = getStorageTable<Invoice>('invoices');
-    const invoiceIds: string[] = [];
-    invoices.forEach((inv) => {
-      if (leaseIds.includes(inv.lease_id) && !inv.deleted_at && !(inv as any).deletedAt) {
-        invoiceIds.push(inv.id);
-        inv.deleted_at = now;
-        (inv as any).deletedAt = now;
-        inv.updated_at = now;
-      }
-    });
-    setStorageTable('invoices', invoices);
-
-    // 5. Soft-delete payments for these invoices
-    const payments = getStorageTable<Payment>('payments');
-    payments.forEach((p) => {
-      if (invoiceIds.includes(p.invoice_id) && !p.deleted_at && !(p as any).deletedAt) {
-        p.deleted_at = now;
-        (p as any).deletedAt = now;
-        p.updated_at = now;
-      }
-    });
-    setStorageTable('payments', payments);
-
-    // 6. Soft-delete maintenance requests for these units
-    const maintenance = getStorageTable<MaintenanceRequest>('maintenance_requests');
-    maintenance.forEach((m) => {
-      if (unitIds.includes(m.unit_id) && !m.deleted_at && !(m as any).deletedAt) {
-        m.deleted_at = now;
-        (m as any).deletedAt = now;
-        m.updated_at = now;
-      }
-    });
-    setStorageTable('maintenance_requests', maintenance);
-
-    if (isTauri()) {
-      tauriDbDeletePropertyCascading(propertyId).catch((err) => console.warn('[Tauri SQLCipher] cascading prop delete:', err));
+    } else {
+      units.forEach((u) => {
+        if (u.deleted_at || (u as any).deletedAt) return;
+        const hasActiveLease = leases.some(
+          (l) => l.unit_id === u.id && l.status === 'active' && !l.deleted_at && !(l as any).deletedAt
+        );
+        updateStatus(u, hasActiveLease ? 'occupied' : 'vacant');
+      });
     }
 
-    this.notifyWrite();
+    if (hasChanges) {
+      this.setMemoryTable('units', units);
+    }
+  }
+
+  // --- Transactional Cascading Soft Deletes ---
+
+  public deletePropertyCascading(propertyId: string): boolean {
+    void this.deletePropertyCascadingAsync(propertyId).catch(() => {});
     return true;
+  }
+
+  public async deletePropertyCascadingAsync(propertyId: string): Promise<boolean> {
+    const now = Date.now();
+    const prevProps = [...this.getMemoryTable<Property>('properties')];
+    const prevUnits = [...this.getMemoryTable<Unit>('units')];
+    const prevLeases = [...this.getMemoryTable<Lease>('leases')];
+    const prevInvoices = [...this.getMemoryTable<Invoice>('invoices')];
+    const prevPayments = [...this.getMemoryTable<Payment>('payments')];
+    const prevMaint = [...this.getMemoryTable<MaintenanceRequest>('maintenance_requests')];
+
+    const updatedProps = prevProps.map((p) =>
+      p.id === propertyId ? { ...p, deleted_at: now, updated_at: now, device_id: this.deviceId } : p
+    );
+
+    const unitIds = new Set<string>();
+    const updatedUnits = prevUnits.map((u) => {
+      if (u.property_id === propertyId && !u.deleted_at && !(u as any).deletedAt) {
+        unitIds.add(u.id);
+        return { ...u, deleted_at: now, updated_at: now, device_id: this.deviceId };
+      }
+      return u;
+    });
+
+    const leaseIds = new Set<string>();
+    const updatedLeases = prevLeases.map((l) => {
+      if (unitIds.has(l.unit_id) && !l.deleted_at && !(l as any).deletedAt) {
+        leaseIds.add(l.id);
+        return { ...l, deleted_at: now, updated_at: now, device_id: this.deviceId };
+      }
+      return l;
+    });
+
+    const invoiceIds = new Set<string>();
+    const updatedInvoices = prevInvoices.map((inv) => {
+      if (leaseIds.has(inv.lease_id) && !inv.deleted_at && !(inv as any).deletedAt) {
+        invoiceIds.add(inv.id);
+        return { ...inv, deleted_at: now, updated_at: now, device_id: this.deviceId };
+      }
+      return inv;
+    });
+
+    const updatedPayments = prevPayments.map((pay) => {
+      if (invoiceIds.has(pay.invoice_id) && !pay.deleted_at && !(pay as any).deletedAt) {
+        return { ...pay, deleted_at: now, updated_at: now, device_id: this.deviceId };
+      }
+      return pay;
+    });
+
+    const updatedMaint = prevMaint.map((m) => {
+      if (unitIds.has(m.unit_id) && !m.deleted_at && !(m as any).deletedAt) {
+        return { ...m, deleted_at: now, updated_at: now, device_id: this.deviceId };
+      }
+      return m;
+    });
+
+    this.setMemoryTable('properties', updatedProps);
+    this.setMemoryTable('units', updatedUnits);
+    this.setMemoryTable('leases', updatedLeases);
+    this.setMemoryTable('invoices', updatedInvoices);
+    this.setMemoryTable('payments', updatedPayments);
+    this.setMemoryTable('maintenance_requests', updatedMaint);
+    this.notifyWrite();
+
+    try {
+      await this.enqueueDexieWork(async () => {
+        await this.dexieInstance.transaction(
+          'rw',
+          [
+            this.dexieInstance.properties,
+            this.dexieInstance.units,
+            this.dexieInstance.leases,
+            this.dexieInstance.invoices,
+            this.dexieInstance.payments,
+            this.dexieInstance.maintenance_requests,
+          ],
+          async () => {
+            await this.dexieInstance.properties.bulkPut(updatedProps);
+            await this.dexieInstance.units.bulkPut(updatedUnits);
+            await this.dexieInstance.leases.bulkPut(updatedLeases);
+            await this.dexieInstance.invoices.bulkPut(updatedInvoices);
+            await this.dexieInstance.payments.bulkPut(updatedPayments);
+            await this.dexieInstance.maintenance_requests.bulkPut(updatedMaint);
+          }
+        );
+      });
+
+      if (isTauri()) {
+        await tauriDbDeletePropertyCascading(propertyId);
+      }
+      return true;
+    } catch (err) {
+      // Roll back memory cache if transaction fails
+      this.setMemoryTable('properties', prevProps);
+      this.setMemoryTable('units', prevUnits);
+      this.setMemoryTable('leases', prevLeases);
+      this.setMemoryTable('invoices', prevInvoices);
+      this.setMemoryTable('payments', prevPayments);
+      this.setMemoryTable('maintenance_requests', prevMaint);
+      this.notifyWrite();
+      throw err;
+    }
   }
 
   public deleteUnitCascading(unitId: string): boolean {
-    const now = Date.now();
-
-    // 1. Soft delete unit
-    this.softDeleteItem<Unit>('units', unitId);
-
-    // 2. Soft delete leases for this unit
-    const leases = getStorageTable<Lease>('leases');
-    const leaseIds: string[] = [];
-    leases.forEach((l) => {
-      if (l.unit_id === unitId && !l.deleted_at && !(l as any).deletedAt) {
-        leaseIds.push(l.id);
-        l.deleted_at = now;
-        (l as any).deletedAt = now;
-        l.updated_at = now;
-      }
-    });
-    setStorageTable('leases', leases);
-
-    // 3. Soft delete invoices
-    const invoices = getStorageTable<Invoice>('invoices');
-    const invoiceIds: string[] = [];
-    invoices.forEach((inv) => {
-      if (leaseIds.includes(inv.lease_id) && !inv.deleted_at && !(inv as any).deletedAt) {
-        invoiceIds.push(inv.id);
-        inv.deleted_at = now;
-        (inv as any).deletedAt = now;
-        inv.updated_at = now;
-      }
-    });
-    setStorageTable('invoices', invoices);
-
-    // 4. Soft delete payments
-    const payments = getStorageTable<Payment>('payments');
-    payments.forEach((p) => {
-      if (invoiceIds.includes(p.invoice_id) && !p.deleted_at && !(p as any).deletedAt) {
-        p.deleted_at = now;
-        (p as any).deletedAt = now;
-        p.updated_at = now;
-      }
-    });
-    setStorageTable('payments', payments);
-
-    // 5. Soft delete maintenance requests
-    const maintenance = getStorageTable<MaintenanceRequest>('maintenance_requests');
-    maintenance.forEach((m) => {
-      if (m.unit_id === unitId && !m.deleted_at && !(m as any).deletedAt) {
-        m.deleted_at = now;
-        (m as any).deletedAt = now;
-        m.updated_at = now;
-      }
-    });
-    setStorageTable('maintenance_requests', maintenance);
-
-    if (isTauri()) {
-      tauriDbDeleteUnitCascading(unitId).catch((err) => console.warn('[Tauri SQLCipher] cascading unit delete:', err));
-    }
-
-    this.notifyWrite();
+    void this.deleteUnitCascadingAsync(unitId).catch(() => {});
     return true;
+  }
+
+  public async deleteUnitCascadingAsync(unitId: string): Promise<boolean> {
+    const now = Date.now();
+    const prevUnits = [...this.getMemoryTable<Unit>('units')];
+    const prevLeases = [...this.getMemoryTable<Lease>('leases')];
+    const prevInvoices = [...this.getMemoryTable<Invoice>('invoices')];
+    const prevPayments = [...this.getMemoryTable<Payment>('payments')];
+    const prevMaint = [...this.getMemoryTable<MaintenanceRequest>('maintenance_requests')];
+
+    const updatedUnits = prevUnits.map((u) =>
+      u.id === unitId ? { ...u, deleted_at: now, updated_at: now, device_id: this.deviceId } : u
+    );
+
+    const leaseIds = new Set<string>();
+    const updatedLeases = prevLeases.map((l) => {
+      if (l.unit_id === unitId && !l.deleted_at && !(l as any).deletedAt) {
+        leaseIds.add(l.id);
+        return { ...l, deleted_at: now, updated_at: now, device_id: this.deviceId };
+      }
+      return l;
+    });
+
+    const invoiceIds = new Set<string>();
+    const updatedInvoices = prevInvoices.map((inv) => {
+      if (leaseIds.has(inv.lease_id) && !inv.deleted_at && !(inv as any).deletedAt) {
+        invoiceIds.add(inv.id);
+        return { ...inv, deleted_at: now, updated_at: now, device_id: this.deviceId };
+      }
+      return inv;
+    });
+
+    const updatedPayments = prevPayments.map((pay) => {
+      if (invoiceIds.has(pay.invoice_id) && !pay.deleted_at && !(pay as any).deletedAt) {
+        return { ...pay, deleted_at: now, updated_at: now, device_id: this.deviceId };
+      }
+      return pay;
+    });
+
+    const updatedMaint = prevMaint.map((m) => {
+      if (m.unit_id === unitId && !m.deleted_at && !(m as any).deletedAt) {
+        return { ...m, deleted_at: now, updated_at: now, device_id: this.deviceId };
+      }
+      return m;
+    });
+
+    this.setMemoryTable('units', updatedUnits);
+    this.setMemoryTable('leases', updatedLeases);
+    this.setMemoryTable('invoices', updatedInvoices);
+    this.setMemoryTable('payments', updatedPayments);
+    this.setMemoryTable('maintenance_requests', updatedMaint);
+    this.notifyWrite();
+
+    try {
+      await this.enqueueDexieWork(async () => {
+        await this.dexieInstance.transaction(
+          'rw',
+          [
+            this.dexieInstance.units,
+            this.dexieInstance.leases,
+            this.dexieInstance.invoices,
+            this.dexieInstance.payments,
+            this.dexieInstance.maintenance_requests,
+          ],
+          async () => {
+            await this.dexieInstance.units.bulkPut(updatedUnits);
+            await this.dexieInstance.leases.bulkPut(updatedLeases);
+            await this.dexieInstance.invoices.bulkPut(updatedInvoices);
+            await this.dexieInstance.payments.bulkPut(updatedPayments);
+            await this.dexieInstance.maintenance_requests.bulkPut(updatedMaint);
+          }
+        );
+      });
+
+      if (isTauri()) {
+        await tauriDbDeleteUnitCascading(unitId);
+      }
+      return true;
+    } catch (err) {
+      this.setMemoryTable('units', prevUnits);
+      this.setMemoryTable('leases', prevLeases);
+      this.setMemoryTable('invoices', prevInvoices);
+      this.setMemoryTable('payments', prevPayments);
+      this.setMemoryTable('maintenance_requests', prevMaint);
+      this.notifyWrite();
+      throw err;
+    }
   }
 
   public deleteInvoiceCascading(invoiceId: string): boolean {
-    const now = Date.now();
-    this.softDeleteItem<Invoice>('invoices', invoiceId);
-
-    const payments = getStorageTable<Payment>('payments');
-    payments.forEach((p) => {
-      if (p.invoice_id === invoiceId && !p.deleted_at && !(p as any).deletedAt) {
-        p.deleted_at = now;
-        (p as any).deletedAt = now;
-        p.updated_at = now;
-      }
-    });
-    setStorageTable('payments', payments);
-
-    if (isTauri()) {
-      tauriDbDeleteInvoiceCascading(invoiceId).catch((err) => console.warn('[Tauri SQLCipher] cascading inv delete:', err));
-    }
-
-    this.notifyWrite();
+    void this.deleteInvoiceCascadingAsync(invoiceId).catch(() => {});
     return true;
+  }
+
+  public async deleteInvoiceCascadingAsync(invoiceId: string): Promise<boolean> {
+    const now = Date.now();
+    const prevInvoices = [...this.getMemoryTable<Invoice>('invoices')];
+    const prevPayments = [...this.getMemoryTable<Payment>('payments')];
+
+    const updatedInvoices = prevInvoices.map((inv) =>
+      inv.id === invoiceId
+        ? { ...inv, deleted_at: now, updated_at: now, device_id: this.deviceId }
+        : inv
+    );
+
+    const updatedPayments = prevPayments.map((pay) => {
+      if (pay.invoice_id === invoiceId && !pay.deleted_at && !(pay as any).deletedAt) {
+        return { ...pay, deleted_at: now, updated_at: now, device_id: this.deviceId };
+      }
+      return pay;
+    });
+
+    this.setMemoryTable('invoices', updatedInvoices);
+    this.setMemoryTable('payments', updatedPayments);
+    this.notifyWrite();
+
+    try {
+      await this.enqueueDexieWork(async () => {
+        await this.dexieInstance.transaction(
+          'rw',
+          [this.dexieInstance.invoices, this.dexieInstance.payments],
+          async () => {
+            await this.dexieInstance.invoices.bulkPut(updatedInvoices);
+            await this.dexieInstance.payments.bulkPut(updatedPayments);
+          }
+        );
+      });
+
+      if (isTauri()) {
+        await tauriDbDeleteInvoiceCascading(invoiceId);
+      }
+      return true;
+    } catch (err) {
+      this.setMemoryTable('invoices', prevInvoices);
+      this.setMemoryTable('payments', prevPayments);
+      this.notifyWrite();
+      throw err;
+    }
   }
 
   public deleteTenantCascading(tenantId: string): boolean {
-    const now = Date.now();
-    this.softDeleteItem<Tenant>('tenants', tenantId);
-
-    const leases = getStorageTable<Lease>('leases');
-    const leaseIds: string[] = [];
-    leases.forEach((l) => {
-      if (l.tenant_id === tenantId && !l.deleted_at && !(l as any).deletedAt) {
-        leaseIds.push(l.id);
-        l.deleted_at = now;
-        (l as any).deletedAt = now;
-        l.updated_at = now;
-      }
-    });
-    setStorageTable('leases', leases);
-
-    const invoices = getStorageTable<Invoice>('invoices');
-    const invoiceIds: string[] = [];
-    invoices.forEach((inv) => {
-      if (leaseIds.includes(inv.lease_id) && !inv.deleted_at && !(inv as any).deletedAt) {
-        invoiceIds.push(inv.id);
-        inv.deleted_at = now;
-        (inv as any).deletedAt = now;
-        inv.updated_at = now;
-      }
-    });
-    setStorageTable('invoices', invoices);
-
-    const payments = getStorageTable<Payment>('payments');
-    payments.forEach((p) => {
-      if (invoiceIds.includes(p.invoice_id) && !p.deleted_at && !(p as any).deletedAt) {
-        p.deleted_at = now;
-        (p as any).deletedAt = now;
-        p.updated_at = now;
-      }
-    });
-    setStorageTable('payments', payments);
-
-    if (isTauri()) {
-      tauriDbDeleteTenantCascading(tenantId).catch((err) => console.warn('[Tauri SQLCipher] cascading tenant delete:', err));
-    }
-
-    this.notifyWrite();
+    void this.deleteTenantCascadingAsync(tenantId).catch(() => {});
     return true;
   }
 
-  // --- Payment & FIFO Allocation ---
+  public async deleteTenantCascadingAsync(tenantId: string): Promise<boolean> {
+    const now = Date.now();
+    const prevTenants = [...this.getMemoryTable<Tenant>('tenants')];
+    const prevLeases = [...this.getMemoryTable<Lease>('leases')];
+    const prevInvoices = [...this.getMemoryTable<Invoice>('invoices')];
+    const prevPayments = [...this.getMemoryTable<Payment>('payments')];
 
-  public allocatePayment(
+    const updatedTenants = prevTenants.map((t) =>
+      t.id === tenantId
+        ? { ...t, deleted_at: now, updated_at: now, device_id: this.deviceId }
+        : t
+    );
+
+    const leaseIds = new Set<string>();
+    const updatedLeases = prevLeases.map((l) => {
+      if (l.tenant_id === tenantId && !l.deleted_at && !(l as any).deletedAt) {
+        leaseIds.add(l.id);
+        return { ...l, deleted_at: now, updated_at: now, device_id: this.deviceId };
+      }
+      return l;
+    });
+
+    const invoiceIds = new Set<string>();
+    const updatedInvoices = prevInvoices.map((inv) => {
+      if (leaseIds.has(inv.lease_id) && !inv.deleted_at && !(inv as any).deletedAt) {
+        invoiceIds.add(inv.id);
+        return { ...inv, deleted_at: now, updated_at: now, device_id: this.deviceId };
+      }
+      return inv;
+    });
+
+    const updatedPayments = prevPayments.map((pay) => {
+      if (invoiceIds.has(pay.invoice_id) && !pay.deleted_at && !(pay as any).deletedAt) {
+        return { ...pay, deleted_at: now, updated_at: now, device_id: this.deviceId };
+      }
+      return pay;
+    });
+
+    this.setMemoryTable('tenants', updatedTenants);
+    this.setMemoryTable('leases', updatedLeases);
+    this.setMemoryTable('invoices', updatedInvoices);
+    this.setMemoryTable('payments', updatedPayments);
+    this.notifyWrite();
+
+    try {
+      await this.enqueueDexieWork(async () => {
+        await this.dexieInstance.transaction(
+          'rw',
+          [
+            this.dexieInstance.tenants,
+            this.dexieInstance.leases,
+            this.dexieInstance.invoices,
+            this.dexieInstance.payments,
+          ],
+          async () => {
+            await this.dexieInstance.tenants.bulkPut(updatedTenants);
+            await this.dexieInstance.leases.bulkPut(updatedLeases);
+            await this.dexieInstance.invoices.bulkPut(updatedInvoices);
+            await this.dexieInstance.payments.bulkPut(updatedPayments);
+          }
+        );
+      });
+
+      if (isTauri()) {
+        await tauriDbDeleteTenantCascading(tenantId);
+      }
+      return true;
+    } catch (err) {
+      this.setMemoryTable('tenants', prevTenants);
+      this.setMemoryTable('leases', prevLeases);
+      this.setMemoryTable('invoices', prevInvoices);
+      this.setMemoryTable('payments', prevPayments);
+      this.notifyWrite();
+      throw err;
+    }
+  }
+
+  // --- Transactional Payment & FIFO Allocation ---
+
+  private prepareAllocatePayment(
     leaseId: string,
     paymentAmountMinor: number,
     method: string,
     reference?: string
-  ): { payment: Payment; allocatedInvoices: Invoice[] } {
+  ) {
     const lease = this.getItem<Lease>('leases', leaseId);
     if (!lease) throw new Error('Lease not found');
 
-    const invoices = this.getTable<Invoice>('invoices')
-      .filter((inv) => inv.lease_id === leaseId && inv.status !== 'paid' && inv.status !== 'voided')
+    const now = Date.now();
+    const prevInvoices = [...this.getMemoryTable<Invoice>('invoices')];
+    const prevPayments = [...this.getMemoryTable<Payment>('payments')];
+    const prevCredits = [...this.getMemoryTable<Credit>('credits')];
+    const prevAudit = [...this.getMemoryTable<AuditLog>('audit_log')];
+    const prevSync = [...this.getMemoryTable<SyncQueueItem>('sync_queue')];
+
+    let openInvoices = prevInvoices
+      .filter(
+        (inv) =>
+          inv.lease_id === leaseId &&
+          !inv.deleted_at &&
+          !(inv as any).deletedAt &&
+          inv.status !== 'paid' &&
+          inv.status !== 'voided'
+      )
       .sort((a, b) => new Date(a.due_date).getTime() - new Date(b.due_date).getTime());
 
-    const paymentId = generateUUID();
-    let remainingPayment = paymentAmountMinor;
-    const allocatedInvoices: Invoice[] = [];
+    const workingInvoices = [...prevInvoices];
 
-    for (const inv of invoices) {
+    // If no open invoices exist for this tenant, automatically generate a new invoice for the current billing cycle
+    if (openInvoices.length === 0) {
+      const nowObj = new Date();
+      const year = nowObj.getFullYear();
+      const month = nowObj.getMonth();
+      const dueDay = Math.min(Math.max(1, lease.due_day || 1), 28);
+
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const periodStart = `${year}-${pad(month + 1)}-01`;
+      const lastDay = new Date(year, month + 1, 0).getDate();
+      const periodEnd = `${year}-${pad(month + 1)}-${pad(lastDay)}`;
+      const dueDate = `${year}-${pad(month + 1)}-${pad(dueDay)}`;
+
+      const invoiceTotalMinor = lease.rent_minor > 0 ? lease.rent_minor : paymentAmountMinor;
+
+      const autoInvoice: Invoice = {
+        id: generateUUID(),
+        lease_id: leaseId,
+        period_start: periodStart,
+        period_end: periodEnd,
+        due_date: dueDate,
+        subtotal_minor: invoiceTotalMinor,
+        late_fee_minor: 0,
+        total_minor: invoiceTotalMinor,
+        amount_paid_minor: 0,
+        currency_code: lease.currency_code || 'PKR',
+        status: 'unpaid',
+        updated_at: now,
+        device_id: this.deviceId,
+        deleted_at: null,
+      };
+      (autoInvoice as any).amount_paid = 0;
+      (autoInvoice as any).amountPaid = 0;
+
+      openInvoices = [autoInvoice];
+      workingInvoices.push(autoInvoice);
+    }
+
+    let remainingPayment = paymentAmountMinor;
+    const allocatedMap = new Map<string, Invoice>();
+
+    for (const inv of openInvoices) {
       if (remainingPayment <= 0) break;
 
       const unpaidOnInv = inv.total_minor - inv.amount_paid_minor;
@@ -430,45 +875,408 @@ export class DBClient {
 
       const paymentForInv = Math.min(remainingPayment, unpaidOnInv);
       const newPaid = inv.amount_paid_minor + paymentForInv;
-      const newStatus = newPaid >= inv.total_minor ? 'paid' : 'partially_paid';
+      const newStatus: Invoice['status'] = newPaid >= inv.total_minor ? 'paid' : 'partially_paid';
 
-      const updatedInv = this.updateItem<Invoice>('invoices', inv.id, {
+      allocatedMap.set(inv.id, {
+        ...inv,
         amount_paid_minor: newPaid,
+        amount_paid: newPaid / 100,
+        amountPaid: newPaid / 100,
         status: newStatus,
-      })!;
+        updated_at: now,
+        device_id: this.deviceId,
+      } as any);
 
-      allocatedInvoices.push(updatedInv);
       remainingPayment -= paymentForInv;
     }
 
+    const allocatedInvoices = Array.from(allocatedMap.values());
+    const nextInvoices = workingInvoices.map((inv) => allocatedMap.get(inv.id) || inv);
+
+    let createdCredit: Credit | null = null;
+    const nextCredits = [...prevCredits];
     if (remainingPayment > 0) {
-      this.insertItem<Credit>('credits', {
+      createdCredit = {
         id: generateUUID(),
+        tenant_id: lease.tenant_id,
+        tenantId: lease.tenant_id,
         lease_id: leaseId,
+        leaseId: leaseId,
         amount_minor: remainingPayment,
+        amount: remainingPayment / 100,
         currency_code: lease.currency_code,
         reason: 'Overpayment credit',
-      });
+        status: 'active',
+        created_at: now,
+        createdAt: now,
+        updated_at: now,
+        device_id: this.deviceId,
+        deleted_at: null,
+      };
+      nextCredits.push(createdCredit);
     }
 
-    const firstInvoiceId = allocatedInvoices.length > 0
-      ? allocatedInvoices[0].id
-      : invoices.length > 0
-      ? invoices[0].id
-      : 'unallocated';
+    const firstInvoiceId =
+      allocatedInvoices.length > 0
+        ? allocatedInvoices[0].id
+        : openInvoices.length > 0
+        ? openInvoices[0].id
+        : 'unallocated';
 
-    const payment = this.insertItem<Payment>('payments', {
-      id: paymentId,
+    const payment: Payment = {
+      id: generateUUID(),
       invoice_id: firstInvoiceId,
       amount_minor: paymentAmountMinor,
       currency_code: lease.currency_code,
       method,
-      reference: reference || `REF-${Date.now().toString().slice(-6)}`,
-      paid_at: new Date().toISOString(),
+      reference: reference || `REF-${now.toString().slice(-6)}`,
+      paid_at: new Date(now).toISOString(),
+      updated_at: now,
+      device_id: this.deviceId,
+      deleted_at: null,
+    };
+
+    const nextPayments = [...prevPayments, payment];
+    const auditEntry = this.buildAuditEntry('PAYMENT_ALLOCATE', 'payments', payment.id, null, {
+      payment,
+      allocatedInvoiceIds: allocatedInvoices.map((i) => i.id),
+    });
+    const syncEntry = this.buildSyncItem('payments', payment.id, 'insert', payment);
+
+    return {
+      payment,
+      allocatedInvoices,
+      createdCredit,
+      nextInvoices,
+      nextPayments,
+      nextCredits,
+      nextAudit: [auditEntry, ...prevAudit],
+      nextSync: [...prevSync, syncEntry],
+      auditEntry,
+      syncEntry,
+      rollback: () => {
+        this.setMemoryTable('invoices', prevInvoices);
+        this.setMemoryTable('payments', prevPayments);
+        this.setMemoryTable('credits', prevCredits);
+        this.setMemoryTable('audit_log', prevAudit);
+        this.setMemoryTable('sync_queue', prevSync);
+        this.notifyWrite();
+      },
+    };
+  }
+
+  public allocatePayment(
+    leaseId: string,
+    paymentAmountMinor: number,
+    method: string,
+    reference?: string
+  ): { payment: Payment; allocatedInvoices: Invoice[] } {
+    const plan = this.prepareAllocatePayment(leaseId, paymentAmountMinor, method, reference);
+
+    this.setMemoryTable('invoices', plan.nextInvoices);
+    this.setMemoryTable('payments', plan.nextPayments);
+    this.setMemoryTable('credits', plan.nextCredits);
+    this.setMemoryTable('audit_log', plan.nextAudit);
+    this.setMemoryTable('sync_queue', plan.nextSync);
+    this.notifyWrite();
+
+    void this.enqueueDexieWork(async () => {
+      await this.dexieInstance.transaction(
+        'rw',
+        [
+          this.dexieInstance.invoices,
+          this.dexieInstance.payments,
+          this.dexieInstance.credits,
+          this.dexieInstance.audit_log,
+          this.dexieInstance.sync_queue,
+        ],
+        async () => {
+          if (plan.allocatedInvoices.length > 0) {
+            await this.dexieInstance.invoices.bulkPut(plan.allocatedInvoices);
+          }
+          await this.dexieInstance.payments.put(plan.payment);
+          if (plan.createdCredit) {
+            await this.dexieInstance.credits.put(plan.createdCredit);
+          }
+          await this.dexieInstance.audit_log.put(plan.auditEntry);
+          await this.dexieInstance.sync_queue.put(plan.syncEntry);
+        }
+      );
+    }).catch(() => {
+      plan.rollback();
     });
 
+    if (isTauri()) {
+      for (const inv of plan.allocatedInvoices) {
+        tauriDbUpdateItem('invoices', inv.id, inv).catch(() => {});
+      }
+      tauriDbInsertItem('payments', plan.payment).catch(() => {});
+      if (plan.createdCredit) {
+        tauriDbInsertItem('credits', plan.createdCredit).catch(() => {});
+      }
+    }
+
+    return { payment: plan.payment, allocatedInvoices: plan.allocatedInvoices };
+  }
+
+  public addPayment(
+    leaseId: string,
+    paymentAmountMinor: number,
+    method: string,
+    reference?: string
+  ): { payment: Payment; allocatedInvoices: Invoice[] } {
+    return this.allocatePayment(leaseId, paymentAmountMinor, method, reference);
+  }
+
+  public deletePayment(paymentId: string): boolean {
+    const prevPayments = [...this.getMemoryTable<Payment>('payments')];
+    const targetPayment = prevPayments.find((p) => p.id === paymentId);
+    if (!targetPayment) return false;
+
+    const now = Date.now();
+    const updatedPayments = prevPayments.map((p) =>
+      p.id === paymentId
+        ? { ...p, deleted_at: now, updated_at: now, device_id: this.deviceId }
+        : p
+    );
+    this.setMemoryTable('payments', updatedPayments);
+
+    let updatedInvoice: Invoice | null = null;
+    const prevInvoices = [...this.getMemoryTable<Invoice>('invoices')];
+    if (targetPayment.invoice_id && targetPayment.invoice_id !== 'unallocated') {
+      const invIndex = prevInvoices.findIndex((i) => i.id === targetPayment.invoice_id);
+      if (invIndex >= 0) {
+        const inv = prevInvoices[invIndex];
+        const newPaidMinor = Math.max(0, inv.amount_paid_minor - targetPayment.amount_minor);
+        const isPastDue = new Date(inv.due_date).getTime() < now;
+
+        let newStatus: Invoice['status'] = 'unpaid';
+        if (newPaidMinor >= inv.total_minor && inv.total_minor > 0) {
+          newStatus = 'paid';
+        } else if (newPaidMinor > 0) {
+          newStatus = 'partially_paid';
+        } else {
+          newStatus = isPastDue ? 'overdue' : 'unpaid';
+        }
+
+        const updatedInv: Invoice = {
+          ...inv,
+          amount_paid_minor: newPaidMinor,
+          amount_paid: newPaidMinor / 100,
+          amountPaid: newPaidMinor / 100,
+          status: newStatus,
+          updated_at: now,
+          device_id: this.deviceId,
+        } as any;
+        updatedInvoice = updatedInv;
+
+        const nextInvoices = [...prevInvoices];
+        nextInvoices[invIndex] = updatedInv;
+        this.setMemoryTable('invoices', nextInvoices);
+      }
+    }
+
+    const auditEntry = this.buildAuditEntry('PAYMENT_DELETE', 'payments', paymentId, targetPayment, {
+      reversedInvoiceId: targetPayment.invoice_id,
+      reversedAmountMinor: targetPayment.amount_minor,
+    });
+    const syncItem = this.buildSyncItem('payments', paymentId, 'delete', targetPayment);
+
+    const auditLogs = [auditEntry, ...this.getMemoryTable<AuditLog>('audit_log')];
+    this.setMemoryTable('audit_log', auditLogs);
+
+    const syncQueue = [...this.getMemoryTable<SyncQueueItem>('sync_queue'), syncItem];
+    this.setMemoryTable('sync_queue', syncQueue);
+
     this.notifyWrite();
-    return { payment, allocatedInvoices };
+
+    void this.enqueueDexieWork(async () => {
+      await this.dexieInstance.transaction(
+        'rw',
+        [
+          this.dexieInstance.payments,
+          this.dexieInstance.invoices,
+          this.dexieInstance.audit_log,
+          this.dexieInstance.sync_queue,
+        ],
+        async () => {
+          await this.dexieInstance.payments.put(
+            updatedPayments.find((p) => p.id === paymentId)!
+          );
+          if (updatedInvoice) {
+            await this.dexieInstance.invoices.put(updatedInvoice);
+          }
+          await this.dexieInstance.audit_log.put(auditEntry);
+          await this.dexieInstance.sync_queue.put(syncItem);
+        }
+      );
+    }).catch((err) => {
+      console.error('[DatabaseService] Failed to persist deletePayment in Dexie:', err);
+    });
+
+    return true;
+  }
+
+  public async allocatePaymentAsync(
+    leaseId: string,
+    paymentAmountMinor: number,
+    method: string,
+    reference?: string
+  ): Promise<{ payment: Payment; allocatedInvoices: Invoice[] }> {
+    const plan = this.prepareAllocatePayment(leaseId, paymentAmountMinor, method, reference);
+
+    this.setMemoryTable('invoices', plan.nextInvoices);
+    this.setMemoryTable('payments', plan.nextPayments);
+    this.setMemoryTable('credits', plan.nextCredits);
+    this.setMemoryTable('audit_log', plan.nextAudit);
+    this.setMemoryTable('sync_queue', plan.nextSync);
+    this.notifyWrite();
+
+    try {
+      await this.enqueueDexieWork(async () => {
+        await this.dexieInstance.transaction(
+          'rw',
+          [
+            this.dexieInstance.invoices,
+            this.dexieInstance.payments,
+            this.dexieInstance.credits,
+            this.dexieInstance.audit_log,
+            this.dexieInstance.sync_queue,
+          ],
+          async () => {
+            if (plan.allocatedInvoices.length > 0) {
+              await this.dexieInstance.invoices.bulkPut(plan.allocatedInvoices);
+            }
+            await this.dexieInstance.payments.put(plan.payment);
+            if (plan.createdCredit) {
+              await this.dexieInstance.credits.put(plan.createdCredit);
+            }
+            await this.dexieInstance.audit_log.put(plan.auditEntry);
+            await this.dexieInstance.sync_queue.put(plan.syncEntry);
+          }
+        );
+      });
+
+      if (isTauri()) {
+        for (const inv of plan.allocatedInvoices) {
+          await tauriDbUpdateItem('invoices', inv.id, inv);
+        }
+        await tauriDbInsertItem('payments', plan.payment);
+        if (plan.createdCredit) {
+          await tauriDbInsertItem('credits', plan.createdCredit);
+        }
+      }
+
+      return { payment: plan.payment, allocatedInvoices: plan.allocatedInvoices };
+    } catch (err) {
+      plan.rollback();
+      throw err;
+    }
+  }
+
+  private prepareRecordInvoicePayment(
+    invoiceId: string,
+    paymentAmountMinor: number,
+    method: string,
+    reference?: string
+  ) {
+    const inv = this.getItem<Invoice>('invoices', invoiceId);
+    if (!inv) throw new Error('Invoice not found');
+
+    const now = Date.now();
+    const prevInvoices = [...this.getMemoryTable<Invoice>('invoices')];
+    const prevPayments = [...this.getMemoryTable<Payment>('payments')];
+    const prevAudit = [...this.getMemoryTable<AuditLog>('audit_log')];
+    const prevSync = [...this.getMemoryTable<SyncQueueItem>('sync_queue')];
+
+    const remainingBalanceMinor = Math.max(0, inv.total_minor - inv.amount_paid_minor);
+    let newPaid = inv.amount_paid_minor + paymentAmountMinor;
+    let overpaymentMinor = 0;
+
+    if (paymentAmountMinor > remainingBalanceMinor) {
+      overpaymentMinor = paymentAmountMinor - remainingBalanceMinor;
+      newPaid = inv.total_minor; // capped at exact total
+    }
+
+    const newStatus: Invoice['status'] = newPaid >= inv.total_minor ? 'paid' : 'partially_paid';
+
+    const updatedInv: Invoice = {
+      ...inv,
+      amount_paid_minor: newPaid,
+      amount_paid: newPaid / 100,
+      amountPaid: newPaid / 100,
+      status: newStatus,
+      updated_at: now,
+      device_id: this.deviceId,
+    } as any;
+
+    const payment: Payment = {
+      id: generateUUID(),
+      invoice_id: invoiceId,
+      amount_minor: paymentAmountMinor,
+      currency_code: inv.currency_code,
+      method,
+      reference: reference || `REF-${now.toString().slice(-6)}`,
+      paid_at: new Date(now).toISOString(),
+      updated_at: now,
+      device_id: this.deviceId,
+      deleted_at: null,
+    };
+
+    let createdCredit: Credit | null = null;
+    const prevCredits = [...this.getMemoryTable<Credit>('credits')];
+    const nextCredits = [...prevCredits];
+
+    if (overpaymentMinor > 0) {
+      const lease = inv.lease_id ? this.getItem<Lease>('leases', inv.lease_id) : undefined;
+      const tenantId = lease ? lease.tenant_id : undefined;
+
+      createdCredit = {
+        id: generateUUID(),
+        tenant_id: tenantId || '',
+        tenantId: tenantId || '',
+        lease_id: inv.lease_id || '',
+        leaseId: inv.lease_id || '',
+        amount_minor: overpaymentMinor,
+        amount: overpaymentMinor / 100,
+        currency_code: inv.currency_code || 'PKR',
+        reason: `Overpayment credit for invoice ${inv.id}`,
+        status: 'active',
+        created_at: now,
+        createdAt: now,
+        updated_at: now,
+        device_id: this.deviceId,
+        deleted_at: null,
+      } as any;
+
+      nextCredits.push(createdCredit!);
+    }
+
+    const nextInvoices = prevInvoices.map((item) => (item.id === invoiceId ? updatedInv : item));
+    const nextPayments = [...prevPayments, payment];
+    const auditEntry = this.buildAuditEntry('PAYMENT_RECORD', 'payments', payment.id, inv, updatedInv);
+    const syncEntry = this.buildSyncItem('payments', payment.id, 'insert', payment);
+
+    return {
+      payment,
+      updatedInv,
+      createdCredit,
+      nextInvoices,
+      nextPayments,
+      nextCredits,
+      nextAudit: [auditEntry, ...prevAudit],
+      nextSync: [...prevSync, syncEntry],
+      auditEntry,
+      syncEntry,
+      rollback: () => {
+        this.setMemoryTable('invoices', prevInvoices);
+        this.setMemoryTable('payments', prevPayments);
+        this.setMemoryTable('credits', prevCredits);
+        this.setMemoryTable('audit_log', prevAudit);
+        this.setMemoryTable('sync_queue', prevSync);
+        this.notifyWrite();
+      },
+    };
   }
 
   public recordInvoicePayment(
@@ -476,71 +1284,241 @@ export class DBClient {
     paymentAmountMinor: number,
     method: string,
     reference?: string
-  ): { payment: Payment; invoice: Invoice } {
-    const inv = this.getItem<Invoice>('invoices', invoiceId);
-    if (!inv) throw new Error('Invoice not found');
+  ): { payment: Payment; invoice: Invoice; credit?: Credit | null } {
+    const plan = this.prepareRecordInvoicePayment(invoiceId, paymentAmountMinor, method, reference);
 
-    const paymentId = generateUUID();
-    const newPaid = inv.amount_paid_minor + paymentAmountMinor;
-    const newStatus = newPaid >= inv.total_minor ? 'paid' : 'partially_paid';
+    this.setMemoryTable('invoices', plan.nextInvoices);
+    this.setMemoryTable('payments', plan.nextPayments);
+    this.setMemoryTable('credits', plan.nextCredits);
+    this.setMemoryTable('audit_log', plan.nextAudit);
+    this.setMemoryTable('sync_queue', plan.nextSync);
+    this.notifyWrite();
 
-    const updatedInv = this.updateItem<Invoice>('invoices', inv.id, {
-      amount_paid_minor: newPaid,
-      status: newStatus,
-    })!;
-
-    const payment = this.insertItem<Payment>('payments', {
-      id: paymentId,
-      invoice_id: invoiceId,
-      amount_minor: paymentAmountMinor,
-      currency_code: inv.currency_code,
-      method,
-      reference: reference || `REF-${Date.now().toString().slice(-6)}`,
-      paid_at: new Date().toISOString(),
+    void this.enqueueDexieWork(async () => {
+      await this.dexieInstance.transaction(
+        'rw',
+        [
+          this.dexieInstance.invoices,
+          this.dexieInstance.payments,
+          this.dexieInstance.credits,
+          this.dexieInstance.audit_log,
+          this.dexieInstance.sync_queue,
+        ],
+        async () => {
+          await this.dexieInstance.invoices.put(plan.updatedInv);
+          await this.dexieInstance.payments.put(plan.payment);
+          if (plan.createdCredit) {
+            await this.dexieInstance.credits.put(plan.createdCredit);
+          }
+          await this.dexieInstance.audit_log.put(plan.auditEntry);
+          await this.dexieInstance.sync_queue.put(plan.syncEntry);
+        }
+      );
+    }).catch(() => {
+      plan.rollback();
     });
 
-    this.notifyWrite();
-    return { payment, invoice: updatedInv };
+    if (isTauri()) {
+      tauriDbUpdateItem('invoices', plan.updatedInv.id, plan.updatedInv).catch(() => {});
+      tauriDbInsertItem('payments', plan.payment).catch(() => {});
+      if (plan.createdCredit) {
+        tauriDbInsertItem('credits', plan.createdCredit).catch(() => {});
+      }
+    }
+
+    return { payment: plan.payment, invoice: plan.updatedInv, credit: plan.createdCredit };
   }
 
-  public exportAllData(): Record<string, any> {
-    const tables = [
-      'organizations',
-      'users',
-      'owners',
-      'properties',
-      'units',
-      'tenants',
-      'leases',
-      'invoices',
-      'payments',
-      'credits',
-      'deposits',
-      'maintenance_requests',
-      'vendors',
-      'expenses',
-      'documents',
-      'tenant_contact_logs',
-      'audit_log',
-      'sync_queue',
-      'rent_increases',
-      'utility_bills',
-    ];
-    const dump: Record<string, any> = {};
-    for (const t of tables) {
-      dump[t] = getStorageTable(t);
+  public async recordInvoicePaymentAsync(
+    invoiceId: string,
+    paymentAmountMinor: number,
+    method: string,
+    reference?: string
+  ): Promise<{ payment: Payment; invoice: Invoice; credit?: Credit | null }> {
+    const plan = this.prepareRecordInvoicePayment(invoiceId, paymentAmountMinor, method, reference);
+
+    this.setMemoryTable('invoices', plan.nextInvoices);
+    this.setMemoryTable('payments', plan.nextPayments);
+    this.setMemoryTable('credits', plan.nextCredits);
+    this.setMemoryTable('audit_log', plan.nextAudit);
+    this.setMemoryTable('sync_queue', plan.nextSync);
+    this.notifyWrite();
+
+    try {
+      await this.enqueueDexieWork(async () => {
+        await this.dexieInstance.transaction(
+          'rw',
+          [
+            this.dexieInstance.invoices,
+            this.dexieInstance.payments,
+            this.dexieInstance.credits,
+            this.dexieInstance.audit_log,
+            this.dexieInstance.sync_queue,
+          ],
+          async () => {
+            await this.dexieInstance.invoices.put(plan.updatedInv);
+            await this.dexieInstance.payments.put(plan.payment);
+            if (plan.createdCredit) {
+              await this.dexieInstance.credits.put(plan.createdCredit);
+            }
+            await this.dexieInstance.audit_log.put(plan.auditEntry);
+            await this.dexieInstance.sync_queue.put(plan.syncEntry);
+          }
+        );
+      });
+
+      if (isTauri()) {
+        await tauriDbUpdateItem('invoices', plan.updatedInv.id, plan.updatedInv);
+        await tauriDbInsertItem('payments', plan.payment);
+        if (plan.createdCredit) {
+          await tauriDbInsertItem('credits', plan.createdCredit);
+        }
+      }
+
+      return { payment: plan.payment, invoice: plan.updatedInv, credit: plan.createdCredit };
+    } catch (err) {
+      plan.rollback();
+      throw err;
+    }
+  }
+
+  // --- Bulk Export / Atomic Import ---
+
+  public exportAllData(): Record<string, any[]> {
+    const dump: Record<string, any[]> = {};
+    for (const tableName of ALL_DB_TABLES) {
+      dump[tableName] = [...this.getMemoryTable(tableName)];
     }
     return dump;
   }
 
   public importAllData(data: Record<string, any>): void {
-    if (!data || typeof data !== 'object') throw new Error('Invalid database payload');
+    void this.importAllDataAsync(data).catch(() => {});
+  }
+
+  public async importAllDataAsync(data: Record<string, any>): Promise<void> {
+    if (!data || typeof data !== 'object') {
+      throw new Error('Invalid database payload');
+    }
+
+    const prevSnapshot = this.exportAllData();
+    const validEntries: Array<[string, any[]]> = [];
+
     for (const [key, value] of Object.entries(data)) {
-      if (Array.isArray(value)) {
-        setStorageTable(key, value);
+      if (Array.isArray(value) && ALL_DB_TABLES.includes(key as any)) {
+        const normalized = value.map((row) => normalizeRecord(row));
+        this.setMemoryTable(key, normalized);
+        validEntries.push([key, normalized]);
       }
     }
+
     this.notifyWrite();
+
+    try {
+      await this.enqueueDexieWork(async () => {
+        const tables = validEntries.map(([name]) => this.dexieInstance.table(name));
+        await this.dexieInstance.transaction('rw', tables, async () => {
+          for (const [tableName, rows] of validEntries) {
+            const tbl = this.dexieInstance.table(tableName);
+            await tbl.clear();
+            if (rows.length > 0) {
+              await tbl.bulkPut(rows);
+            }
+          }
+        });
+      });
+
+      if (isTauri()) {
+        await tauriDbImportAll(data);
+      }
+    } catch (err) {
+      for (const [tableName, rows] of Object.entries(prevSnapshot)) {
+        this.setMemoryTable(tableName, rows);
+      }
+      this.notifyWrite();
+      throw err;
+    }
+  }
+
+  public async wipeAllDataAsync(): Promise<void> {
+    for (const tableName of ALL_DB_TABLES) {
+      this.setMemoryTable(tableName, []);
+    }
+    await this.enqueueDexieWork(async () => {
+      const tables = ALL_DB_TABLES.map((name) => this.dexieInstance.table(name));
+      await this.dexieInstance.transaction('rw', tables, async () => {
+        for (const tableName of ALL_DB_TABLES) {
+          await this.dexieInstance.table(tableName).clear();
+        }
+      });
+    });
+    this.syncUnitOccupancy();
+    this.notifyWrite();
+  }
+
+  /**
+   * Complete Wipe and Repopulation of local database (Dexie IndexedDB + in-memory store).
+   * Used for Google Drive full restore: clears all existing records from all tables,
+   * then inserts the exact restored records.
+   */
+  public async wipeAndRestoreAllDataAsync(sourceData: Record<string, any>): Promise<number> {
+    if (!sourceData || typeof sourceData !== 'object') {
+      throw new Error('Invalid database payload for restoration');
+    }
+
+    const tablesMap: Record<string, any[]> = {};
+
+    for (const tableName of ALL_DB_TABLES) {
+      if (sourceData.tables && Array.isArray(sourceData.tables[tableName])) {
+        tablesMap[tableName] = sourceData.tables[tableName];
+      } else if (sourceData.data && Array.isArray(sourceData.data[tableName])) {
+        tablesMap[tableName] = sourceData.data[tableName];
+      } else if (Array.isArray(sourceData[tableName])) {
+        tablesMap[tableName] = sourceData[tableName];
+      } else if (tableName === 'maintenance_requests' && Array.isArray(sourceData.maintenance)) {
+        tablesMap[tableName] = sourceData.maintenance;
+      } else {
+        tablesMap[tableName] = [];
+      }
+    }
+
+    let totalRestoredRecords = 0;
+    const entriesToInsert: Array<[string, any[]]> = [];
+
+    // 1. Wipe in-memory tables and prepare normalized records
+    for (const tableName of ALL_DB_TABLES) {
+      const rows = tablesMap[tableName] || [];
+      const normalized = rows.map((row) => normalizeRecord(row));
+      this.setMemoryTable(tableName, normalized);
+      if (normalized.length > 0) {
+        entriesToInsert.push([tableName, normalized]);
+        totalRestoredRecords += normalized.length;
+      }
+    }
+
+    // 2. Wipe Dexie IndexedDB tables and repopulate
+    await this.enqueueDexieWork(async () => {
+      const tables = ALL_DB_TABLES.map((name) => this.dexieInstance.table(name));
+      await this.dexieInstance.transaction('rw', tables, async () => {
+        for (const tableName of ALL_DB_TABLES) {
+          await this.dexieInstance.table(tableName).clear();
+        }
+        for (const [tableName, rows] of entriesToInsert) {
+          if (rows.length > 0) {
+            await this.dexieInstance.table(tableName).bulkPut(rows);
+          }
+        }
+      });
+    });
+
+    if (isTauri()) {
+      await tauriDbImportAll(tablesMap);
+    }
+
+    this.syncUnitOccupancy();
+    this.notifyWrite();
+
+    return totalRestoredRecords;
   }
 }
 

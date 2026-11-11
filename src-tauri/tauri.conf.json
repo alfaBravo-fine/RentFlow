@@ -30,6 +30,7 @@
   },
   "bundle": {
     "active": true,
+    "targets": ["nsis"],
     "category": "Business",
     "copyright": "Copyright 2026 RentFlow",
     "icon": [
@@ -41,7 +42,17 @@
     ],
     "identifier": "com.rentflow.app",
     "shortDescription": "Offline-First Encrypted Desktop Property Management",
-    "longDescription": "Production-ready offline-first desktop rental property management system powered by Tauri v2, SQLCipher AES-256 encrypted database, and zero-knowledge Google Drive backup."
+    "longDescription": "Production-ready offline-first desktop rental property management system powered by Tauri v2, SQLCipher AES-256 encrypted database, and zero-knowledge Google Drive backup.",
+    "windows": {
+      "nsis": {
+        "oneClick": false,
+        "perMachine": false,
+        "allowToChangeInstallationDirectory": true,
+        "createDesktopShortcut": true,
+        "createStartMenuShortcut": true,
+        "shortcutName": "RentFlow"
+      }
+    }
   },
   "plugins": {
     "updater": {

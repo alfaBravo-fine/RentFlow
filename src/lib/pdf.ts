@@ -2,6 +2,7 @@ import { Invoice, Payment, Lease, Tenant, Property, Unit, Organization } from '.
 import { CountryPack } from '../countries/types';
 import { formatMoney } from './money';
 import { formatDate } from './format';
+import { printHtml } from '../components/print/PrintContext';
 
 export interface ReceiptPdfData {
   organization: Organization;
@@ -18,98 +19,69 @@ export function printReceiptDocument(data: ReceiptPdfData) {
   const { organization, property, unit, tenant, invoice, payment, pack } = data;
 
   const html = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Payment Receipt - ${invoice.id}</title>
-      <style>
-        body { font-family: system-ui, sans-serif; margin: 40px; color: #0a0a0a; background: #fff; }
-        .header { border-bottom: 2px solid #e5e5e5; padding-bottom: 20px; display: flex; justify-content: space-between; }
-        .title { font-size: 24px; font-weight: bold; }
-        .badge { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; padding: 4px 12px; border-radius: 9999px; font-size: 13px; font-weight: 600; }
-        .section { margin-top: 24px; }
-        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
-        .label { color: #6b7280; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
-        .val { font-size: 15px; font-weight: 500; margin-top: 4px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 24px; }
-        th { text-align: left; padding: 10px; border-bottom: 2px solid #e5e5e5; font-size: 12px; color: #6b7280; text-transform: uppercase; }
-        td { padding: 12px 10px; border-bottom: 1px solid #e5e5e5; font-size: 14px; }
-        .total-row { font-weight: bold; font-size: 16px; background: #fafafa; }
-        .number { font-family: 'JetBrains Mono', monospace; }
-        .footer { margin-top: 48px; border-top: 1px solid #e5e5e5; pt: 16px; font-size: 12px; color: #9ca3af; text-align: center; }
-      </style>
-    </head>
-    <body>
-      <div class="header">
+    <div style="font-family: system-ui, sans-serif; padding: 36px; color: #111827; background: #fff;">
+      <div style="border-bottom: 2px solid #111827; padding-bottom: 20px; display: flex; justify-content: space-between; align-items: flex-start;">
         <div>
-          <div class="title">${organization.name}</div>
-          <div style="color: #6b7280; margin-top: 4px;">OFFICIAL RENTAL PAYMENT RECEIPT</div>
+          <div style="font-size: 22px; font-weight: 700;">${organization.name}</div>
+          <div style="color: #6b7280; font-size: 12px; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Official Rental Payment Receipt</div>
         </div>
-        <div>
-          <span class="badge">OFFICIALLY PAID</span>
+        <div style="font-size: 12px; font-weight: 700; color: #15803d; text-transform: uppercase;">
+          Officially Settled
         </div>
       </div>
 
-      <div class="section grid">
+      <div style="margin-top: 24px; display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
         <div>
-          <div class="label">Billed To (Tenant)</div>
-          <div class="val">${tenant.name}</div>
-          <div style="color: #6b7280; font-size: 13px;">${property.name} - ${unit.name}</div>
-          <div style="color: #6b7280; font-size: 13px;">${property.address}</div>
+          <div style="color: #6b7280; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">Billed To (Tenant)</div>
+          <div style="font-size: 15px; font-weight: 600; margin-top: 4px;">${tenant.name}</div>
+          <div style="color: #6b7280; font-size: 12px; margin-top: 2px;">${property.name} — ${unit.name}</div>
+          <div style="color: #6b7280; font-size: 12px;">${property.address || ''}</div>
         </div>
-        <div>
-          <div class="label">Receipt Details</div>
-          <div class="val">Invoice #: ${invoice.id}</div>
-          <div class="val">Period: ${formatDate(invoice.period_start, pack)} – ${formatDate(invoice.period_end, pack)}</div>
-          <div class="val">Paid Date: ${payment ? formatDate(payment.paid_at, pack) : '—'}</div>
+        <div style="text-align: right;">
+          <div style="color: #6b7280; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">Receipt Details</div>
+          <div style="font-size: 13px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums;">Invoice #: ${invoice.id}</div>
+          <div style="font-size: 12px; color: #4b5563; margin-top: 2px;">Period: ${formatDate(invoice.period_start, pack)} – ${formatDate(invoice.period_end, pack)}</div>
+          <div style="font-size: 12px; color: #4b5563;">Paid Date: ${payment ? formatDate(payment.paid_at, pack) : '—'}</div>
         </div>
       </div>
 
-      <table>
+      <table style="width: 100%; border-collapse: collapse; margin-top: 28px;">
         <thead>
-          <tr>
-            <th>Description</th>
-            <th style="text-align: right;">Amount</th>
+          <tr style="border-bottom: 1px solid #d1d5db;">
+            <th style="text-align: left; padding: 10px 0; font-size: 11px; color: #374151; text-transform: uppercase; font-weight: 700;">Description</th>
+            <th style="text-align: right; padding: 10px 0; font-size: 11px; color: #374151; text-transform: uppercase; font-weight: 700;">Amount</th>
           </tr>
         </thead>
         <tbody>
-          <tr>
-            <td>Monthly Rent (${formatDate(invoice.period_start, pack)})</td>
-            <td style="text-align: right;" class="number">${formatMoney(invoice.subtotal_minor, pack)}</td>
+          <tr style="border-bottom: 1px solid #e5e7eb;">
+            <td style="padding: 12px 0; font-size: 13px;">Monthly Rent (${formatDate(invoice.period_start, pack)})</td>
+            <td style="padding: 12px 0; text-align: right; font-family: monospace; font-variant-numeric: tabular-nums; font-size: 13px;">${formatMoney(invoice.subtotal_minor, pack)}</td>
           </tr>
           ${
             invoice.late_fee_minor > 0
-              ? `<tr>
-                  <td>Late Payment Charge</td>
-                  <td style="text-align: right;" class="number">${formatMoney(invoice.late_fee_minor, pack)}</td>
+              ? `<tr style="border-bottom: 1px solid #e5e7eb;">
+                  <td style="padding: 12px 0; font-size: 13px;">Late Payment Charge</td>
+                  <td style="padding: 12px 0; text-align: right; font-family: monospace; font-variant-numeric: tabular-nums; font-size: 13px;">${formatMoney(invoice.late_fee_minor, pack)}</td>
                  </tr>`
               : ''
           }
-          <tr class="total-row">
-            <td>Total Rent Charged</td>
-            <td style="text-align: right;" class="number">${formatMoney(invoice.total_minor, pack)}</td>
+          <tr style="border-top: 2px solid #111827; font-weight: 700;">
+            <td style="padding: 14px 0 6px; font-size: 14px;">Total Rent Charged</td>
+            <td style="padding: 14px 0 6px; text-align: right; font-family: monospace; font-variant-numeric: tabular-nums; font-size: 15px;">${formatMoney(invoice.total_minor, pack)}</td>
           </tr>
-          <tr class="total-row" style="color: #15803d;">
-            <td>Amount Received (${payment?.method || 'Direct'})</td>
-            <td style="text-align: right;" class="number">${formatMoney(payment?.amount_minor || invoice.amount_paid_minor, pack)}</td>
+          <tr style="font-weight: 700; color: #15803d;">
+            <td style="padding: 6px 0 14px; font-size: 14px;">Amount Received (${payment?.method || 'Direct'})</td>
+            <td style="padding: 6px 0 14px; text-align: right; font-family: monospace; font-variant-numeric: tabular-nums; font-size: 15px;">${formatMoney(payment?.amount_minor || invoice.amount_paid_minor, pack)}</td>
           </tr>
         </tbody>
       </table>
 
-      <div class="footer">
-        Generated by RentFlow Offline Property Management Engine &bull; Document Reference #${payment?.id || invoice.id}
+      <div style="margin-top: 40px; border-top: 1px solid #e5e7eb; padding-top: 16px; font-size: 11px; color: #6b7280; display: flex; justify-content: space-between;">
+        <span>Generated by RentFlow Property Management</span>
+        <span>Document Ref: ${payment?.id || invoice.id}</span>
       </div>
-
-      <script>
-        window.onload = function() { window.print(); }
-      </script>
-    </body>
-    </html>
+    </div>
   `;
 
-  const win = window.open('', '_blank');
-  if (win) {
-    win.document.write(html);
-    win.document.close();
-  }
+  printHtml(html);
 }

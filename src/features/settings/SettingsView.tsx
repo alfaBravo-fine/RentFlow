@@ -1,5 +1,4 @@
 import React, { useState } from 'react';
-import * as XLSX from 'xlsx';
 import { seedInitialData } from '../../db/seed';
 import { usePack, usePackStore } from '../../countries/usePack';
 import { AVAILABLE_PACKS } from '../../countries/resolver';
@@ -9,9 +8,7 @@ import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { Modal } from '../../components/ui/Modal';
 import {
-  Settings,
   RefreshCw,
-  Trash2,
   Globe,
   Database,
   ShieldCheck,
@@ -25,30 +22,60 @@ import {
   FileText,
   CheckCircle2,
   Lock,
+  LayoutGrid,
+  Palette,
+  Sun,
+  Moon,
 } from '../../components/icons';
 import { useToast } from '../../components/toast/ToastContext';
-import { useAuthStore } from '../../stores/authStore';
 import { useDriveSync } from '../../hooks/useDriveSync';
 import { db } from '../../db/client';
+import { databaseService } from '../../db/DatabaseService';
 import { Property, Tenant } from '../../db/schema';
 import { generateUUID } from '../../lib/uuid';
 import { isTauri, tauriBackupDatabaseFile } from '../../lib/tauri/bridge';
+import { exportAllDataToExcel, updateExistingExcel } from '../../lib/excelExport';
+import { useUIStore, UILayout } from '../../stores/uiStore';
+import { useThemeStore, THEME_PALETTES, ColorPalette, ThemeMode } from '../../stores/themeStore';
 
 export const SettingsView: React.FC = () => {
   const pack = usePack();
   const setCountryCode = usePackStore((s) => s.setCountryCode);
   const { showToast } = useToast();
-  const { syncState, syncNow } = useDriveSync();
+  const { syncState, syncNow, restoreFromDrive, isRestoring } = useDriveSync();
+
+  const [appDataPath, setAppDataPath] = useState<string>('Loading app data directory...');
+
+  React.useEffect(() => {
+    databaseService.getAppDataPath().then((path) => {
+      setAppDataPath(path);
+    }).catch(() => {
+      setAppDataPath(isTauri() ? 'AppData/Roaming/RentFlow' : 'Browser IndexedDB / Encrypted Local Storage');
+    });
+  }, []);
 
   // Auto Sync State
   const [autoSyncEnabled, setAutoSyncEnabled] = useState<boolean>(() => {
     return localStorage.getItem('rentflow_auto_sync_enabled') !== 'false';
   });
 
+  // Export Destination State
+  const [exportDestination, setExportDestination] = useState<string>(() => {
+    return localStorage.getItem('rentflow_export_destination') || 'C:\\Users\\Documents\\RentFlowExports';
+  });
+
+  const handleSaveExportDestination = (val: string) => {
+    setExportDestination(val);
+    localStorage.setItem('rentflow_export_destination', val);
+    showToast({ type: 'success', message: 'Export destination path updated successfully.' });
+  };
+
   // Backup Database Modal State
   const [isBackupModalOpen, setIsBackupModalOpen] = useState(false);
   const [backupDestinationPath, setBackupDestinationPath] = useState('');
   const [isBackingUp, setIsBackingUp] = useState(false);
+  const [isForceSyncing, setIsForceSyncing] = useState(false);
+  const [isForceRestoring, setIsForceRestoring] = useState(false);
 
   // Agency Commission
   const [agencyCommission, setAgencyCommission] = useState<number>(() => {
@@ -111,46 +138,60 @@ export const SettingsView: React.FC = () => {
     });
   };
 
-  // Feature 2.9: Multi-tab Excel Export
-  const handleExportExcel = () => {
+  // Feature: Professional Styled Multi-tab Excel Export via ExcelJS
+  const [isExportingExcel, setIsExportingExcel] = useState(false);
+
+  const handleExportExcel = async () => {
+    setIsExportingExcel(true);
     try {
-      const wb = XLSX.utils.book_new();
-
-      const tableNames = [
-        'organizations',
-        'properties',
-        'units',
-        'tenants',
-        'leases',
-        'invoices',
-        'payments',
-        'expenses',
-        'vendors',
-        'owners',
-        'documents',
-        'tenant_contact_logs',
-        'utility_bills',
-      ];
-
-      tableNames.forEach((tbl) => {
-        const rows = db.getTable<any>(tbl);
-        const ws = XLSX.utils.json_to_sheet(rows.length > 0 ? rows : [{ info: 'No records' }]);
-        const sheetTitle = tbl.charAt(0).toUpperCase() + tbl.slice(1, 31);
-        XLSX.utils.book_append_sheet(wb, ws, sheetTitle);
+      showToast({
+        type: 'info',
+        message: 'Generating styled Excel workbook (.xlsx) with ExcelJS...',
       });
-
-      const fileName = `RentFlow_Full_Portfolio_${new Date().toISOString().slice(0, 10)}.xlsx`;
-      XLSX.writeFile(wb, fileName);
-
+      const result = await exportAllDataToExcel(pack);
       showToast({
         type: 'success',
-        message: `Multi-tab Excel workbook exported successfully as "${fileName}".`,
+        message: `Successfully exported ${result.totalRecords} records across ${result.sheetCount} worksheets to "${result.fileName}"!`,
       });
     } catch (err: any) {
+      console.error('ExcelJS export error:', err);
       showToast({
         type: 'error',
         message: err.message || 'Could not export Excel workbook.',
       });
+    } finally {
+      setIsExportingExcel(false);
+    }
+  };
+
+  // Feature: Smart Update Existing Excel Master Workbook via ExcelJS
+  const [isUpdatingExcel, setIsUpdatingExcel] = useState(false);
+
+  const handleUpdateExcelFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsUpdatingExcel(true);
+    try {
+      showToast({
+        type: 'info',
+        message: `Reading '${file.name}' with ExcelJS and checking for existing records...`,
+      });
+
+      const result = await updateExistingExcel(file, pack);
+      showToast({
+        type: 'success',
+        message: `Excel Update Complete! Appended ${result.totalRecords} new record(s) across ${result.sheetCount} worksheets to "${result.fileName}".`,
+      });
+    } catch (err: any) {
+      console.error('ExcelJS update error:', err);
+      showToast({
+        type: 'error',
+        message: err.message || 'Could not update existing Excel file.',
+      });
+    } finally {
+      setIsUpdatingExcel(false);
+      e.target.value = ''; // Reset input to allow re-uploading same file if needed
     }
   };
 
@@ -380,10 +421,14 @@ export const SettingsView: React.FC = () => {
       });
       setIsBackupModalOpen(false);
       setBackupDestinationPath('');
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const msg =
+        typeof err === 'string'
+          ? err
+          : (err as { message?: string })?.message || 'Database backup failed.';
       showToast({
         type: 'error',
-        message: err.message || 'Database backup failed.',
+        message: msg,
       });
     } finally {
       setIsBackingUp(false);
@@ -401,7 +446,8 @@ export const SettingsView: React.FC = () => {
     setTimeout(() => window.location.reload(), 1000);
   };
 
-  const [isForceSyncing, setIsForceSyncing] = useState(false);
+  const { uiLayout, setUILayout } = useUIStore();
+  const { theme, setMode, setColorPalette } = useThemeStore();
 
   return (
     <div className="space-y-6 max-w-5xl mx-auto pb-12">
@@ -410,9 +456,227 @@ export const SettingsView: React.FC = () => {
           System Settings & Data Controls
         </h1>
         <p className="text-xs text-[var(--text-secondary)] mt-1">
-          Jurisdiction defaults, financial approval gates, bulk import/export, and zero-knowledge backup management
+          UI appearance, jurisdiction defaults, financial approval gates, bulk import/export, and zero-knowledge backup management
         </p>
       </div>
+
+      {/* PART 1.5: Multi-Theme & Color Palette Picker */}
+      <Card className="space-y-6">
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <Palette className="w-4 h-4 text-[var(--accent)]" />
+            <CardTitle>Theme & Color Palettes</CardTitle>
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge variant="accent" className="capitalize">
+              {theme.mode} Mode &bull; {THEME_PALETTES.find((p) => p.id === theme.colorPalette)?.name || theme.colorPalette}
+            </Badge>
+          </div>
+        </CardHeader>
+
+        <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+          Select a tailored color palette and toggle between Light and Dark mode. Color variables adapt dynamically across all cards, sidebars, tables, and buttons.
+        </p>
+
+        {/* Mode Toggle Bar */}
+        <div>
+          <label className="block text-xs font-semibold uppercase tracking-wider text-[var(--text-subtle)] mb-2.5">
+            Base Color Mode
+          </label>
+          <div className="inline-flex p-1 rounded-xl bg-[var(--bg-base)] border border-[var(--border-subtle)] gap-1">
+            <button
+              type="button"
+              onClick={() => {
+                setMode('light');
+                showToast({ type: 'info', message: 'Switched to Light Mode.' });
+              }}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                theme.mode === 'light'
+                  ? 'bg-[var(--bg-surface)] text-[var(--text-primary)] shadow-xs font-semibold'
+                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              }`}
+            >
+              <Sun className="w-3.5 h-3.5 text-amber-500" />
+              <span>Light Mode</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMode('dark');
+                showToast({ type: 'info', message: 'Switched to Dark Mode.' });
+              }}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                theme.mode === 'dark'
+                  ? 'bg-[var(--bg-surface)] text-[var(--text-primary)] shadow-xs font-semibold'
+                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              }`}
+            >
+              <Moon className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Dark Mode</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Color Palettes Selection */}
+        <div className="space-y-4">
+          <label className="block text-xs font-semibold uppercase tracking-wider text-[var(--text-subtle)]">
+            Select Color Palette Swatch
+          </label>
+          
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
+            {THEME_PALETTES.map((palette) => {
+              const isSelected = theme.colorPalette === palette.id;
+              return (
+                <div
+                  key={palette.id}
+                  onClick={() => {
+                    setColorPalette(palette.id);
+                    showToast({ type: 'info', message: `Theme changed to ${palette.name} (${palette.accentLabel} Accent).` });
+                  }}
+                  className={`p-3.5 rounded-2xl border-2 transition-all cursor-pointer space-y-3 relative overflow-hidden ${
+                    isSelected
+                      ? 'border-[var(--accent)] bg-[var(--accent-subtle)]/30 shadow-xs'
+                      : 'border-[var(--border-subtle)] hover:border-[var(--border-strong)] bg-[var(--bg-base)]'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="text-xs font-bold text-[var(--text-primary)] block">
+                        {palette.name}
+                      </span>
+                      <span className="text-[10px] text-[var(--text-subtle)] uppercase tracking-wider font-mono">
+                        {palette.category} mode &bull; {palette.accentLabel}
+                      </span>
+                    </div>
+                    {isSelected && (
+                      <span className="w-5 h-5 rounded-full bg-[var(--accent)] text-white flex items-center justify-center shrink-0">
+                        <Check className="w-3 h-3" />
+                      </span>
+                    )}
+                  </div>
+
+                  <p className="text-[11px] text-[var(--text-secondary)] leading-normal line-clamp-2">
+                    {palette.description}
+                  </p>
+
+                  {/* Circular Swatches */}
+                  <div className="flex items-center gap-2 pt-1">
+                    <div
+                      className="w-6 h-6 rounded-full border border-black/10 dark:border-white/10 shadow-2xs"
+                      style={{ backgroundColor: palette.colors.bg }}
+                      title={`Background: ${palette.colors.bg}`}
+                    />
+                    <div
+                      className="w-6 h-6 rounded-full border border-black/10 dark:border-white/10 shadow-2xs"
+                      style={{ backgroundColor: palette.colors.surface }}
+                      title={`Card Surface: ${palette.colors.surface}`}
+                    />
+                    <div
+                      className="w-6 h-6 rounded-full border border-black/10 dark:border-white/10 shadow-2xs"
+                      style={{ backgroundColor: palette.colors.border }}
+                      title={`Border: ${palette.colors.border}`}
+                    />
+                    <div
+                      className="w-6 h-6 rounded-full border border-black/10 dark:border-white/10 shadow-2xs"
+                      style={{ backgroundColor: palette.colors.accent }}
+                      title={`Accent: ${palette.colors.accent}`}
+                    />
+                    <span className="text-[11px] font-mono text-[var(--text-subtle)] ml-auto">
+                      {palette.colors.accent}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </Card>
+
+      {/* PART 2: UI Appearance & Layout Switcher */}
+      <Card className="space-y-4">
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <LayoutGrid className="w-4 h-4 text-[var(--accent)]" />
+            <CardTitle>Appearance & Workspace Layout</CardTitle>
+          </div>
+          <Badge variant="accent">
+            {uiLayout === 'top-tabs' ? 'Top-Tabs Navigation Active' : 'Sidebar Navigation (Default)'}
+          </Badge>
+        </CardHeader>
+
+        <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+          Customize your navigation layout structure while preserving RentFlow&apos;s modern dark/light theme tokens, typography, and rounded minimalism.
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
+          {/* Option 1: Sidebar (Default) */}
+          <div
+            onClick={() => {
+              setUILayout('sidebar');
+              showToast({ type: 'info', message: 'Switched to Sidebar Navigation (Default)' });
+            }}
+            className={`p-4 rounded-2xl border-2 transition-all cursor-pointer ${
+              uiLayout === 'sidebar'
+                ? 'border-[var(--accent)] bg-[var(--accent-subtle)]/20 shadow-xs'
+                : 'border-[var(--border-subtle)] hover:border-[var(--border-strong)] bg-[var(--bg-base)]'
+            }`}
+          >
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold text-[var(--text-primary)]">
+                Sidebar Navigation (Default)
+              </span>
+              {uiLayout === 'sidebar' && <Check className="w-4 h-4 text-[var(--accent)]" />}
+            </div>
+            <p className="text-[11px] text-[var(--text-secondary)] leading-relaxed">
+              Standard desktop layout with left collapsible sidebar, fast keyboard navigation, spacious card padding, and 1400px centered viewport.
+            </p>
+          </div>
+
+          {/* Option 2: Top-Tabs */}
+          <div
+            onClick={() => {
+              setUILayout('top-tabs');
+              showToast({ type: 'info', message: 'Switched to Top-Tabs Navigation (Linear / Notion Style)' });
+            }}
+            className={`p-4 rounded-2xl border-2 transition-all cursor-pointer ${
+              uiLayout === 'top-tabs'
+                ? 'border-[var(--accent)] bg-[var(--accent-subtle)]/20 shadow-xs'
+                : 'border-[var(--border-subtle)] hover:border-[var(--border-strong)] bg-[var(--bg-base)]'
+            }`}
+          >
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold text-[var(--text-primary)]">
+                Top Navigation (Top-Tabs)
+              </span>
+              {uiLayout === 'top-tabs' && <Check className="w-4 h-4 text-[var(--accent)]" />}
+            </div>
+            <p className="text-[11px] text-[var(--text-secondary)] leading-relaxed">
+              Moves navigation into a horizontal tab bar at the top (like Excel structure), using the exact same modern light/dark theme tokens, rounded corners, and Linear/Notion styling.
+            </p>
+          </div>
+        </div>
+
+        <div className="max-w-xs pt-1">
+          <label className="block text-xs font-medium text-[var(--text-secondary)] mb-1">
+            Active Layout Setting:
+          </label>
+          <select
+            value={uiLayout}
+            onChange={(e) => {
+              const next = e.target.value as UILayout;
+              setUILayout(next);
+              showToast({
+                type: 'info',
+                message: `Layout changed to ${next === 'top-tabs' ? 'Top-Tabs Navigation' : 'Sidebar Navigation'}.`,
+              });
+            }}
+            className="w-full h-9 px-3 text-xs rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] cursor-pointer"
+          >
+            <option value="sidebar">Sidebar Navigation (Default • Left Menu)</option>
+            <option value="top-tabs">Top Navigation (Top-Tabs • Linear/Excel Structure)</option>
+          </select>
+        </div>
+      </Card>
 
       {/* Active Jurisdiction Pack */}
       <Card className="space-y-4">
@@ -475,6 +739,47 @@ export const SettingsView: React.FC = () => {
             </div>
           </div>
         )}
+      </Card>
+
+      {/* Export Destination Settings */}
+      <Card className="space-y-4">
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <Download className="w-4 h-4 text-[var(--accent)]" />
+            <CardTitle>Export Destination Path</CardTitle>
+          </div>
+          <Badge variant="accent">Desktop Folder Sync</Badge>
+        </CardHeader>
+
+        <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+          Configure the default target folder where professional Excel spreadsheet exports (.xlsx) are saved on your local file system.
+        </p>
+
+        <div className="flex flex-col sm:flex-row items-center gap-3 pt-1">
+          <div className="flex-1 w-full">
+            <Input
+              value={exportDestination}
+              onChange={(e) => handleSaveExportDestination(e.target.value)}
+              placeholder="e.g. C:\Users\Name\Documents\RentFlowExports"
+            />
+          </div>
+          <Button
+            variant="outline"
+            onClick={async () => {
+              if (isTauri()) {
+                showToast({ type: 'info', message: 'Tauri folder picker dialog opened.' });
+              } else {
+                const customPath = prompt('Enter export destination folder path:', exportDestination);
+                if (customPath) {
+                  handleSaveExportDestination(customPath);
+                }
+              }
+            }}
+            className="w-full sm:w-auto h-10 px-4 shrink-0"
+          >
+            Browse Folder
+          </Button>
+        </div>
       </Card>
 
       {/* Feature 2.7: Petty Cash & Maintenance Approval Threshold */}
@@ -560,21 +865,60 @@ export const SettingsView: React.FC = () => {
           Import bulk properties or tenant rosters directly from CSV files. Export your complete RentFlow portfolio across 13 relational sheets into a native Microsoft Excel (.xlsx) workbook.
         </p>
 
-        {/* 1. Full Multi-Tab Excel Export */}
+        {/* 1. Full Multi-Tab Excel Export (ExcelJS) */}
         <div className="p-4 rounded-2xl bg-[var(--bg-base)] border border-[var(--border-subtle)] space-y-3">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <h4 className="text-xs font-bold text-[var(--text-primary)]">
-                Export Full Portfolio to Excel (.xlsx)
-              </h4>
-              <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
-                Generates a multi-tab workbook with sheets for Properties, Units, Tenants, Leases, Invoices, Payments, Expenses, Vendors, Owners, Documents, and Utility Bills.
+              <div className="flex items-center gap-2">
+                <h4 className="text-xs font-bold text-[var(--text-primary)]">
+                  Export All Data to Excel (.xlsx)
+                </h4>
+                <Badge variant="success">ExcelJS Styled</Badge>
+              </div>
+              <p className="text-[11px] text-[var(--text-secondary)] mt-1 leading-relaxed">
+                Generates a professional workbook with dedicated worksheets for Properties, Units, Tenants, Leases, Invoices, Payments, Expenses, Maintenance, and Vendors. Includes dark blue title rows, light gray headers, auto-calculated column widths, and native currency formatting.
               </p>
             </div>
-            <Button size="sm" variant="primary" onClick={handleExportExcel} className="shrink-0 gap-1.5">
-              <Download className="w-3.5 h-3.5" />
-              <span>Export All Data (.xlsx)</span>
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={handleExportExcel}
+              disabled={isExportingExcel}
+              className="shrink-0 gap-2 font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs"
+            >
+              <FileSpreadsheet className={`w-3.5 h-3.5 ${isExportingExcel ? 'animate-spin' : ''}`} />
+              <span>{isExportingExcel ? 'Generating .xlsx...' : 'Export All Data to Excel'}</span>
             </Button>
+          </div>
+        </div>
+
+        {/* 2. Smart Update Existing Master Excel Workbook */}
+        <div className="p-4 rounded-2xl bg-[var(--bg-base)] border border-[var(--border-subtle)] space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <h4 className="text-xs font-bold text-[var(--text-primary)]">
+                  Update Existing Excel File (.xlsx)
+                </h4>
+                <Badge variant="info">Smart Deduplication</Badge>
+              </div>
+              <p className="text-[11px] text-[var(--text-secondary)] mt-1 leading-relaxed">
+                Select your existing Master Excel file. RentFlow will read the workbook, check for existing records in each sheet, and append only new data for Properties, Units, Tenants, Leases, Invoices, Payments, Expenses, Maintenance, and Vendors without duplicates.
+              </p>
+            </div>
+            <label className="shrink-0 inline-flex cursor-pointer">
+              <input
+                type="file"
+                accept=".xlsx"
+                onChange={handleUpdateExcelFile}
+                disabled={isUpdatingExcel}
+                className="hidden"
+              />
+              <span className="inline-flex items-center gap-2 h-9 px-3.5 text-xs font-semibold rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white transition-colors shadow-xs">
+                <Upload className={`w-3.5 h-3.5 ${isUpdatingExcel ? 'animate-spin' : ''}`} />
+                <span>{isUpdatingExcel ? 'Updating Excel...' : 'Update Existing Excel File'}</span>
+              </span>
+            </label>
           </div>
         </div>
 
@@ -697,17 +1041,60 @@ export const SettingsView: React.FC = () => {
                 showToast({ type: 'info', message: 'Executing Google Drive sync...' });
                 await syncNow();
                 showToast({ type: 'success', message: 'Sync Now complete! Database backed up to Google Drive.' });
-              } catch (err: any) {
-                showToast({ type: 'error', message: err.message || 'Drive sync failed' });
+              } catch (err: unknown) {
+                const msg =
+                  typeof err === 'string'
+                    ? err
+                    : (err as { message?: string })?.message || 'Drive sync failed';
+                showToast({ type: 'error', message: msg });
               } finally {
                 setIsForceSyncing(false);
               }
             }}
-            disabled={isForceSyncing || syncState === 'syncing'}
+            disabled={isForceSyncing || isForceRestoring || isRestoring || syncState === 'syncing'}
             className="gap-2"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isForceSyncing || syncState === 'syncing' ? 'animate-spin' : ''}`} />
             <span>{isForceSyncing || syncState === 'syncing' ? 'Syncing...' : 'Sync Now'}</span>
+          </Button>
+
+          {/* Restore from Drive Button */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={async () => {
+              const confirmed = window.confirm(
+                'Are you sure you want to restore from Google Drive? This will download RentFlow_FullBackup.enc, wipe current local data, and restore all properties, units, tenants, leases, invoices, payments, expenses, settings, and themes.'
+              );
+              if (!confirmed) return;
+
+              setIsForceRestoring(true);
+              try {
+                showToast({ type: 'info', message: 'Downloading RentFlow_FullBackup.enc and restoring database...' });
+                const res = await restoreFromDrive();
+                if (res && res.restored) {
+                  showToast({
+                    type: 'success',
+                    message: `Restore complete! Restored ${res.totalRecords || 0} records across all tables, settings, and themes.`,
+                  });
+                } else {
+                  showToast({ type: 'info', message: res?.message || 'Restore completed (no backup found).' });
+                }
+              } catch (err: unknown) {
+                const msg =
+                  typeof err === 'string'
+                    ? err
+                    : (err as { message?: string })?.message || 'Drive restore failed';
+                showToast({ type: 'error', message: msg });
+              } finally {
+                setIsForceRestoring(false);
+              }
+            }}
+            disabled={isForceRestoring || isRestoring || isForceSyncing || syncState === 'syncing'}
+            className="gap-2 border-[var(--accent)]/40 text-[var(--accent)] hover:bg-[var(--accent-subtle)]/30"
+          >
+            <Download className={`w-3.5 h-3.5 ${isForceRestoring || isRestoring ? 'animate-bounce' : ''}`} />
+            <span>{isForceRestoring || isRestoring ? 'Restoring from Drive...' : 'Restore from Drive'}</span>
           </Button>
 
           {/* Backup Database Button */}
@@ -733,6 +1120,17 @@ export const SettingsView: React.FC = () => {
               <span>Import Snapshot (.json)</span>
             </span>
           </label>
+        </div>
+
+        {/* Native App Data Directory Info */}
+        <div className="mt-4 p-3.5 rounded-xl bg-[var(--bg-base)] border border-[var(--border-subtle)] space-y-1">
+          <div className="flex items-center gap-2 text-xs font-semibold text-[var(--text-primary)]">
+            <Database className="w-3.5 h-3.5 text-indigo-500" />
+            <span>Application Data Directory (app_data_dir):</span>
+          </div>
+          <p className="text-[11px] font-mono text-[var(--text-secondary)] break-all select-all bg-[var(--bg-surface)] p-2 rounded border border-[var(--border-subtle)]">
+            {appDataPath}
+          </p>
         </div>
       </Card>
 

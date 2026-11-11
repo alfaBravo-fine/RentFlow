@@ -168,15 +168,6 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme, onOpe
   const unreadAlertsCount = allAlertIds.filter((id) => !notificationsState[id]?.read).length;
   const totalVisibleAlerts = activeExpiringLeases.length + activePendingMaintenance.length + activeExpiringDocuments.length;
 
-  const handlePackChange = (code: string) => {
-    setCountryCode(code);
-    const p = getCountryPack(code);
-    showToast({
-      type: 'success',
-      message: `Switched region to ${p.name} (${p.currency.code})`,
-    });
-  };
-
   const handleSignOut = async () => {
     await signOut();
     showToast({ type: 'info', message: 'Signed out of Google Drive' });
@@ -187,14 +178,17 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme, onOpe
       <header className="h-16 border-b border-[var(--border-subtle)] bg-[var(--bg-surface)] px-4 sm:px-8 flex items-center justify-between shrink-0 gap-3">
         {/* Left: Mobile Toggle & Global Search Input */}
         <div className="flex items-center gap-2 sm:gap-3 flex-1 max-w-xl">
-          {/* Mobile hamburger menu toggle */}
-          <button
-            onClick={onOpenSidebar}
-            className="md:hidden w-9 h-9 rounded-full flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-base)] cursor-pointer"
-            title="Open Navigation"
-          >
-            <Menu className="w-5 h-5" />
-          </button>
+          {/* Mobile hamburger menu toggle & logo */}
+          <div className="flex items-center gap-2 md:hidden">
+            <button
+              onClick={onOpenSidebar}
+              className="w-9 h-9 rounded-full flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-base)] cursor-pointer"
+              title="Open Navigation"
+            >
+              <Menu className="w-5 h-5" />
+            </button>
+            <img src="/assets/icon.png" alt="RentFlow" className="w-7 h-7 object-contain" />
+          </div>
 
           {/* Global Search Input Bar (Linear style) */}
           <button
@@ -278,22 +272,6 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme, onOpe
                 </button>
               </div>
             )}
-          </div>
-
-          {/* Global Country Pack Selector */}
-          <div className="flex items-center gap-1.5 px-3 h-[42px] rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] text-xs font-semibold text-[var(--text-primary)]">
-            <Globe className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
-            <select
-              value={countryCode}
-              onChange={(e) => handlePackChange(e.target.value)}
-              className="bg-transparent border-0 focus:outline-none cursor-pointer font-semibold text-xs text-[var(--text-primary)]"
-            >
-              {packs.map((p) => (
-                <option key={p.code} value={p.code} className="bg-[var(--bg-surface)] text-[var(--text-primary)]">
-                  {p.flag} {p.currency.code} ({p.code})
-                </option>
-              ))}
-            </select>
           </div>
 
           {/* Notifications Alert Bell & Popover */}

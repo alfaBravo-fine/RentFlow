@@ -1,7 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as maplibregl from 'maplibre-gl';
+import { setWorkerUrl } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
+
+// Register bundled worker URL with MapLibre to avoid Worker failed to load in Vite
+if (typeof setWorkerUrl === 'function') {
+  setWorkerUrl(workerUrl);
+}
 import { db } from '../../db/client';
 import { Property, Unit } from '../../db/schema';
 import { usePack } from '../../countries/usePack';
@@ -13,7 +20,7 @@ import { Button } from '../../components/ui/Button';
 import { Input, Select } from '../../components/ui/Input';
 import { Modal } from '../../components/ui/Modal';
 import { generateUUID } from '../../lib/uuid';
-import { sanitizeCoordinates, safeLngLatTuple } from '../../lib/geo';
+import { sanitizeCoordinates, safeLngLatTuple, geocodeAddress } from '../../lib/geo';
 import {
   MapPin,
   Search,
@@ -57,6 +64,7 @@ export const MapView: React.FC = () => {
   const mapRef = useRef<maplibregl.Map | null>(null);
   const markersRef = useRef<maplibregl.Marker[]>([]);
   const draftMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const hasInitialFittedRef = useRef<boolean>(false);
 
   const pack = usePack();
   const { showToast } = useToast();
@@ -64,18 +72,21 @@ export const MapView: React.FC = () => {
   const [properties, setProperties] = useState<Property[]>(() => db.getTable<Property>('properties'));
   const units = db.getTable<Unit>('units');
 
-  // Map state persistence
+  // Map state persistence (lat, lng, zoom)
   const savedState = (() => {
     try {
-      const raw = localStorage.getItem('rentflow_map_state');
+      const raw = localStorage.getItem('rentflow_map_position') || localStorage.getItem('rentflow_map_state');
       if (!raw) return null;
       const parsed = JSON.parse(raw);
-      const coords = sanitizeCoordinates(parsed?.center_lat, parsed?.center_lng);
+      const targetLat = parsed?.lat ?? parsed?.center_lat;
+      const targetLng = parsed?.lng ?? parsed?.center_lng;
+      const coords = sanitizeCoordinates(targetLat, targetLng);
       if (coords) {
         return {
-          ...parsed,
           center_lat: coords.lat,
           center_lng: coords.lng,
+          zoom: typeof parsed.zoom === 'number' ? parsed.zoom : 3.5,
+          layer: parsed?.layer || 'streets',
         };
       }
       return null;
@@ -85,6 +96,7 @@ export const MapView: React.FC = () => {
   })();
 
   const [activeLayer, setActiveLayer] = useState<MapLayerType>(savedState?.layer || 'streets');
+  const activeLayerRef = useRef<MapLayerType>(savedState?.layer || 'streets');
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
 
@@ -108,30 +120,91 @@ export const MapView: React.FC = () => {
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [propertyToDelete, setPropertyToDelete] = useState<Property | null>(null);
 
-  // Self-heal stored properties with transposed coordinates
+  // Subscribe to reactive database changes (e.g. when properties are added or edited)
   useEffect(() => {
-    const allProps = db.getTable<Property>('properties');
-    let hasHealed = false;
+    const unsub = db.onWrite(() => {
+      setProperties(db.getTable<Property>('properties').filter((p) => !p.deleted_at));
+    });
+    return unsub;
+  }, []);
+
+  // Self-heal and auto-geocode stored properties missing coordinates
+  useEffect(() => {
+    let isCancelled = false;
+    const healAndGeocodeAll = async () => {
+      const allProps = db.getTable<Property>('properties').filter((p) => !p.deleted_at);
+      let hasChanged = false;
+
+      for (const p of allProps) {
+        const rawLat = p.latitude ?? p.lat;
+        const rawLng = p.longitude ?? p.lng;
+        const coords = sanitizeCoordinates(rawLat, rawLng);
+
+        if (coords) {
+          if (coords.lat !== rawLat || coords.lng !== rawLng) {
+            db.updateItem<Property>('properties', p.id, {
+              lat: coords.lat,
+              lng: coords.lng,
+              latitude: coords.lat,
+              longitude: coords.lng,
+            });
+            hasChanged = true;
+          }
+        } else {
+          // Property is missing coordinates (e.g., added via standard form without manual coordinates)
+          const geocoded = await geocodeAddress(
+            p.address_line1 || p.address || p.name,
+            p.city,
+            p.country_code || pack.code
+          );
+          if (geocoded && !isCancelled) {
+            db.updateItem<Property>('properties', p.id, {
+              lat: geocoded.lat,
+              lng: geocoded.lng,
+              latitude: geocoded.lat,
+              longitude: geocoded.lng,
+            });
+            hasChanged = true;
+          }
+        }
+      }
+
+      if (hasChanged && !isCancelled) {
+        setProperties(db.getTable<Property>('properties').filter((p) => !p.deleted_at));
+      }
+    };
+
+    healAndGeocodeAll();
+    return () => {
+      isCancelled = true;
+    };
+  }, [pack.code]);
+
+  const fitToAllProperties = () => {
+    const map = mapRef.current;
+    if (!map) return;
+    const allProps = db.getTable<Property>('properties').filter((p) => !p.deleted_at);
+    const validCoords: [number, number][] = [];
     allProps.forEach((p) => {
       const rawLat = p.latitude ?? p.lat;
       const rawLng = p.longitude ?? p.lng;
-      if (rawLat != null && rawLng != null) {
-        const coords = sanitizeCoordinates(rawLat, rawLng);
-        if (coords && (coords.lat !== rawLat || coords.lng !== rawLng)) {
-          db.updateItem<Property>('properties', p.id, {
-            lat: coords.lat,
-            lng: coords.lng,
-            latitude: coords.lat,
-            longitude: coords.lng,
-          });
-          hasHealed = true;
-        }
-      }
+      const tuple = safeLngLatTuple(rawLat, rawLng);
+      if (tuple) validCoords.push(tuple);
     });
-    if (hasHealed) {
-      setProperties(db.getTable<Property>('properties'));
+
+    if (validCoords.length === 0) {
+      showToast({ type: 'info', message: 'No property coordinates to frame.' });
+      return;
     }
-  }, []);
+    if (validCoords.length === 1) {
+      map.flyTo({ center: validCoords[0], zoom: 14, speed: 1.2 });
+      return;
+    }
+
+    const bounds = new maplibregl.LngLatBounds(validCoords[0], validCoords[0]);
+    validCoords.forEach((coord) => bounds.extend(coord));
+    map.fitBounds(bounds, { padding: 80, maxZoom: 15, duration: 1000 });
+  };
 
   // Reverse geocoding helper
   const reverseGeocode = async (rawLat: number, rawLng: number) => {
@@ -255,22 +328,26 @@ export const MapView: React.FC = () => {
       reverseGeocode(lat, lng);
     });
 
-    map.on('moveend', () => {
+    const persistMapPosition = () => {
       const center = map.getCenter();
       const zoom = map.getZoom();
       const coords = sanitizeCoordinates(center.lat, center.lng);
       if (coords) {
-        localStorage.setItem(
-          'rentflow_map_state',
-          JSON.stringify({
-            center_lat: coords.lat,
-            center_lng: coords.lng,
-            zoom,
-            layer: activeLayer,
-          })
-        );
+        const payload = {
+          lat: coords.lat,
+          lng: coords.lng,
+          center_lat: coords.lat,
+          center_lng: coords.lng,
+          zoom: Math.round(zoom * 100) / 100,
+          layer: activeLayerRef.current,
+        };
+        localStorage.setItem('rentflow_map_position', JSON.stringify(payload));
+        localStorage.setItem('rentflow_map_state', JSON.stringify(payload));
       }
-    });
+    };
+
+    map.on('moveend', persistMapPosition);
+    map.on('zoomend', persistMapPosition);
 
     mapRef.current = map;
 
@@ -286,6 +363,7 @@ export const MapView: React.FC = () => {
 
   const handleLayerSwitch = (layer: MapLayerType) => {
     setActiveLayer(layer);
+    activeLayerRef.current = layer;
     const map = mapRef.current;
     if (!map) return;
 
@@ -312,15 +390,16 @@ export const MapView: React.FC = () => {
 
     const center = map.getCenter();
     const zoom = map.getZoom();
-    localStorage.setItem(
-      'rentflow_map_state',
-      JSON.stringify({
-        center_lat: center.lat,
-        center_lng: center.lng,
-        zoom,
-        layer,
-      })
-    );
+    const payload = {
+      lat: center.lat,
+      lng: center.lng,
+      center_lat: center.lat,
+      center_lng: center.lng,
+      zoom: Math.round(zoom * 100) / 100,
+      layer,
+    };
+    localStorage.setItem('rentflow_map_state', JSON.stringify(payload));
+    localStorage.setItem('rentflow_map_position', JSON.stringify(payload));
   };
 
   // Render Indigo SVG property markers
@@ -331,12 +410,16 @@ export const MapView: React.FC = () => {
     markersRef.current.forEach((m) => m.remove());
     markersRef.current = [];
 
+    const validTuples: [number, number][] = [];
+
     properties.forEach((prop) => {
+      if (prop.deleted_at || (prop as any).deletedAt) return;
       const rawLat = prop.latitude ?? prop.lat;
       const rawLng = prop.longitude ?? prop.lng;
       const tuple = safeLngLatTuple(rawLat, rawLng);
 
       if (tuple) {
+        validTuples.push(tuple);
         const el = document.createElement('div');
         el.className = 'rentflow-marker cursor-pointer group';
         el.innerHTML = `
@@ -361,6 +444,18 @@ export const MapView: React.FC = () => {
         }
       }
     });
+
+    // Auto-fit bounds on initial mount if there are valid property coordinates and no manual saved position
+    if (!hasInitialFittedRef.current && validTuples.length > 0 && !savedState) {
+      hasInitialFittedRef.current = true;
+      if (validTuples.length === 1) {
+        map.flyTo({ center: validTuples[0], zoom: 13 });
+      } else {
+        const bounds = new maplibregl.LngLatBounds(validTuples[0], validTuples[0]);
+        validTuples.forEach((t) => bounds.extend(t));
+        map.fitBounds(bounds, { padding: 80, maxZoom: 14 });
+      }
+    }
   }, [properties, units]);
 
   const handleOpenPropertySlideOver = (prop: Property) => {
@@ -574,6 +669,13 @@ export const MapView: React.FC = () => {
               }`}
             >
               Terrain
+            </button>
+            <button
+              onClick={fitToAllProperties}
+              title="Fit map view to all property locations"
+              className="px-2 py-0.5 rounded-lg font-semibold text-[var(--accent)] hover:bg-[var(--accent)] hover:text-white transition-colors cursor-pointer ml-0.5"
+            >
+              Fit All
             </button>
           </div>
         </div>

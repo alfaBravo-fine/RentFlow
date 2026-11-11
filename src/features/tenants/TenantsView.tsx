@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import { db } from '../../db/client';
-import { Tenant, Lease, Unit, TenantContactLog } from '../../db/schema';
+import { Tenant, Lease, Unit, TenantContactLog, Credit } from '../../db/schema';
 import { generateUUID } from '../../lib/uuid';
-import { buildWhatsAppLink, buildSmsLink } from '../../lib/deepLinks';
+import { openWhatsAppMessage } from '../../lib/deepLinks';
 import { useToast } from '../../components/toast/ToastContext';
+import { formatMoney } from '../../lib/money';
+import { usePack } from '../../countries/usePack';
 import { Card, CardHeader, CardTitle } from '../../components/ui/Card';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
@@ -29,13 +31,18 @@ import {
   MessageSquare,
   Clock,
   CheckCircle2,
+  Receipt,
 } from '../../components/icons';
+import { TenantLedgerModal } from './TenantLedgerModal';
+import { DestructiveConfirmationModal } from '../../components/ui/DestructiveConfirmationModal';
 
 export const TenantsView: React.FC = () => {
+  const pack = usePack();
   const { showToast } = useToast();
   const [tenants, setTenants] = useState<Tenant[]>(() => db.getTable<Tenant>('tenants').filter((t) => !t.deleted_at));
   const leases = db.getTable<Lease>('leases').filter((l) => !l.deleted_at);
   const units = db.getTable<Unit>('units').filter((u) => !u.deleted_at);
+  const credits = db.getTable<Credit>('credits').filter((c) => !c.deleted_at && !(c as any).deletedAt && c.status === 'active' && (c.amount_minor || 0) > 0);
   const [contactLogs, setContactLogs] = useState<TenantContactLog[]>(() =>
     db.getTable<TenantContactLog>('tenant_contact_logs').filter((l) => !l.deleted_at)
   );
@@ -43,9 +50,10 @@ export const TenantsView: React.FC = () => {
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('grid');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingTenant, setEditingTenant] = useState<Tenant | null>(null);
+  const [deletingTenant, setDeletingTenant] = useState<Tenant | null>(null);
 
-  // Feature 2.8: Contact Log Modal State
   const [contactLogTenant, setContactLogTenant] = useState<Tenant | null>(null);
+  const [selectedLedgerTenant, setSelectedLedgerTenant] = useState<Tenant | null>(null);
   const [newLogChannel, setNewLogChannel] = useState<'whatsapp' | 'email' | 'sms' | 'phone_call' | 'in_person'>('phone_call');
   const [newLogSummary, setNewLogSummary] = useState('');
   const [newLogDetails, setNewLogDetails] = useState('');
@@ -129,20 +137,22 @@ export const TenantsView: React.FC = () => {
     setIsModalOpen(false);
   };
 
-  const handleDeleteTenant = (t: Tenant) => {
-    const success = db.softDeleteItem<Tenant>('tenants', t.id);
+  const handleConfirmDeleteTenant = () => {
+    if (!deletingTenant) return;
+    const success = db.softDeleteItem<Tenant>('tenants', deletingTenant.id);
     if (success) {
       setTenants(db.getTable<Tenant>('tenants'));
       showToast({
         type: 'info',
-        message: `Tenant "${t.name}" archived`,
+        message: `Tenant "${deletingTenant.name}" archived`,
         onUndo: () => {
-          db.updateItem<Tenant>('tenants', t.id, { deleted_at: null });
+          db.updateItem<Tenant>('tenants', deletingTenant.id, { deleted_at: null });
           setTenants(db.getTable<Tenant>('tenants'));
-          showToast({ type: 'success', message: `Restored tenant "${t.name}"` });
+          showToast({ type: 'success', message: `Restored tenant "${deletingTenant.name}"` });
         },
       });
     }
+    setDeletingTenant(null);
   };
 
   const handleAddContactLog = (e: React.FormEvent) => {
@@ -221,11 +231,45 @@ export const TenantsView: React.FC = () => {
       </div>
 
       {/* Main Content */}
-      {viewMode === 'grid' ? (
+      {tenants.length === 0 ? (
+        <Card className="p-12 text-center space-y-4 max-w-xl mx-auto my-8">
+          <div className="w-16 h-16 rounded-3xl bg-[var(--accent-subtle)] text-[var(--accent)] flex items-center justify-center mx-auto shadow-sm">
+            <Users className="w-8 h-8" />
+          </div>
+          <div className="space-y-1.5">
+            <h3 className="text-lg font-bold tracking-tight text-[var(--text-primary)]">
+              No Tenants Registered Yet
+            </h3>
+            <p className="text-xs text-[var(--text-secondary)] leading-relaxed max-w-md mx-auto">
+              Create resident profiles with verified government IDs, emergency contacts, occupant counts, and 1-click WhatsApp/SMS communications.
+            </p>
+          </div>
+          <div className="pt-2">
+            <Button
+              size="lg"
+              variant="primary"
+              onClick={handleOpenAdd}
+              className="gap-2.5 px-6 shadow-md hover:shadow-lg transition-all"
+            >
+              <UserPlus className="w-5 h-5" />
+              <span>+ Add Tenant</span>
+            </Button>
+          </div>
+        </Card>
+      ) : viewMode === 'grid' ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {tenants.map((t) => {
-            const tenantLease = leases.find((l) => l.tenant_id === t.id && l.status === 'active');
+            const tenantLeases = leases.filter((l) => l.tenant_id === t.id);
+            const tenantLease = tenantLeases.find((l) => l.status === 'active');
             const tenantUnit = tenantLease ? units.find((u) => u.id === tenantLease.unit_id) : null;
+
+            const tenantLeaseIds = tenantLeases.map((l) => l.id);
+            const tenantCredits = credits.filter(
+              (c) =>
+                (c.tenant_id === t.id || (c as any).tenantId === t.id) ||
+                (c.lease_id && tenantLeaseIds.includes(c.lease_id))
+            );
+            const creditBalanceMinor = tenantCredits.reduce((sum, c) => sum + (c.amount_minor || 0), 0);
 
             return (
               <Card key={t.id} className="flex flex-col justify-between space-y-4 hover:border-[var(--accent)]/40 transition-colors">
@@ -236,7 +280,14 @@ export const TenantsView: React.FC = () => {
                         {t.name[0]}
                       </div>
                       <div>
-                        <h3 className="text-sm font-bold text-[var(--text-primary)]">{t.name}</h3>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h3 className="text-sm font-bold text-[var(--text-primary)]">{t.name}</h3>
+                          {creditBalanceMinor > 0 && (
+                            <Badge variant="success" className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20 font-bold font-mono text-[11px]">
+                              Credit Balance: {formatMoney(creditBalanceMinor, pack)}
+                            </Badge>
+                          )}
+                        </div>
                         <p className="text-xs text-[var(--text-secondary)] flex items-center gap-1 mt-0.5">
                           <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                           <span>{t.id_type}: {t.id_number}</span>
@@ -245,6 +296,13 @@ export const TenantsView: React.FC = () => {
                     </div>
 
                     <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        onClick={() => setSelectedLedgerTenant(t)}
+                        className="w-7 h-7 rounded-lg flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--accent)] hover:bg-[var(--bg-base)] cursor-pointer"
+                        title="View Account Ledger & Balance"
+                      >
+                        <Receipt className="w-3.5 h-3.5" />
+                      </button>
                       <button
                         onClick={() => setContactLogTenant(t)}
                         className="w-7 h-7 rounded-lg flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--accent)] hover:bg-[var(--bg-base)] cursor-pointer"
@@ -260,7 +318,7 @@ export const TenantsView: React.FC = () => {
                         <Pencil className="w-3.5 h-3.5" />
                       </button>
                       <button
-                        onClick={() => handleDeleteTenant(t)}
+                        onClick={() => setDeletingTenant(t)}
                         className="w-7 h-7 rounded-lg flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--status-danger-fg)] hover:bg-[var(--bg-base)] cursor-pointer"
                         title="Archive Tenant"
                       >
@@ -310,56 +368,19 @@ export const TenantsView: React.FC = () => {
                   </div>
                 </div>
 
-                {/* 1-Click Communications Toolbar */}
-                <div className="pt-3 border-t border-[var(--border-subtle)] grid grid-cols-4 gap-2">
+                {/* WhatsApp Dispatch Toolbar */}
+                <div className="pt-3 border-t border-[var(--border-subtle)] flex items-center justify-end">
                   <Button
                     size="sm"
                     variant="outline"
-                    className="h-8 text-xs px-2 gap-1"
+                    className="h-8 text-xs px-3 gap-1.5 text-emerald-600 dark:text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/10"
                     onClick={() => {
-                      const url = buildWhatsAppLink(t.phone, `Hello ${t.name}, from Property Management.`);
-                      window.open(url, '_blank');
+                      openWhatsAppMessage(t.phone, `Hello ${t.name}, from Property Management.`);
                     }}
-                    title="WhatsApp"
+                    title="Send WhatsApp Message"
                   >
-                    <Send className="w-3 h-3 text-emerald-600" />
-                    <span className="hidden sm:inline">WA</span>
-                  </Button>
-
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-8 text-xs px-2 gap-1"
-                    onClick={() => {
-                      const url = buildSmsLink(t.phone, `Hello ${t.name},`);
-                      window.open(url, '_blank');
-                    }}
-                    title="SMS"
-                  >
-                    <Smartphone className="w-3 h-3 text-blue-600" />
-                    <span className="hidden sm:inline">SMS</span>
-                  </Button>
-
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-8 text-xs px-2 gap-1"
-                    onClick={() => window.open(`mailto:${t.email}`, '_blank')}
-                    title="Email"
-                  >
-                    <Mail className="w-3 h-3 text-amber-600" />
-                    <span className="hidden sm:inline">Mail</span>
-                  </Button>
-
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-8 text-xs px-2 gap-1"
-                    onClick={() => window.open(`tel:${t.phone}`, '_blank')}
-                    title="Call"
-                  >
-                    <Phone className="w-3 h-3 text-indigo-600" />
-                    <span className="hidden sm:inline">Call</span>
+                    <Send className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>WhatsApp</span>
                   </Button>
                 </div>
               </Card>
@@ -378,13 +399,23 @@ export const TenantsView: React.FC = () => {
                   <th className="py-3.5 px-6">Email Address</th>
                   <th className="py-3.5 px-6">Identity Verification</th>
                   <th className="py-3.5 px-6">Occupancy Status</th>
+                  <th className="py-3.5 px-6">Credit Balance</th>
                   <th className="py-3.5 px-6 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--border-subtle)] text-sm">
                 {tenants.map((t) => {
-                  const tenantLease = leases.find((l) => l.tenant_id === t.id && l.status === 'active');
+                  const tenantLeases = leases.filter((l) => l.tenant_id === t.id);
+                  const tenantLease = tenantLeases.find((l) => l.status === 'active');
                   const tenantUnit = tenantLease ? units.find((u) => u.id === tenantLease.unit_id) : null;
+
+                  const tenantLeaseIds = tenantLeases.map((l) => l.id);
+                  const tenantCredits = credits.filter(
+                    (c) =>
+                      (c.tenant_id === t.id || (c as any).tenantId === t.id) ||
+                      (c.lease_id && tenantLeaseIds.includes(c.lease_id))
+                  );
+                  const creditBalanceMinor = tenantCredits.reduce((sum, c) => sum + (c.amount_minor || 0), 0);
 
                   return (
                     <tr key={t.id} className="h-14 hover:bg-[var(--bg-base)] transition-colors">
@@ -405,8 +436,24 @@ export const TenantsView: React.FC = () => {
                           {tenantUnit ? tenantUnit.name : 'Unassigned'}
                         </Badge>
                       </td>
+                      <td className="py-3 px-6 font-mono font-semibold">
+                        {creditBalanceMinor > 0 ? (
+                          <Badge variant="success" className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20 font-bold font-mono text-[11px]">
+                            Credit Balance: {formatMoney(creditBalanceMinor, pack)}
+                          </Badge>
+                        ) : (
+                          <span className="text-[var(--text-subtle)] text-xs">—</span>
+                        )}
+                      </td>
                       <td className="py-3 px-6 text-right">
                         <div className="flex items-center justify-end gap-1.5">
+                          <button
+                            onClick={() => setSelectedLedgerTenant(t)}
+                            className="p-1.5 rounded-lg text-[var(--text-secondary)] hover:text-[var(--accent)] hover:bg-[var(--bg-surface-sunken)] transition-colors cursor-pointer"
+                            title="View Account Ledger & Balance"
+                          >
+                            <Receipt className="w-4 h-4" />
+                          </button>
                           <button
                             onClick={() => setContactLogTenant(t)}
                             className="p-1.5 rounded-lg text-[var(--text-secondary)] hover:text-[var(--accent)] hover:bg-[var(--bg-surface-sunken)] transition-colors cursor-pointer"
@@ -422,7 +469,7 @@ export const TenantsView: React.FC = () => {
                             <Pencil className="w-4 h-4" />
                           </button>
                           <button
-                            onClick={() => handleDeleteTenant(t)}
+                            onClick={() => setDeletingTenant(t)}
                             className="p-1.5 rounded-lg text-[var(--text-secondary)] hover:text-[var(--status-danger-fg)] hover:bg-[var(--bg-surface-sunken)] transition-colors cursor-pointer"
                             title="Archive"
                           >
@@ -676,6 +723,24 @@ export const TenantsView: React.FC = () => {
           </div>
         </form>
       </Modal>
+
+      {/* Feature: Tenant Ledger Modal */}
+      <TenantLedgerModal
+        isOpen={!!selectedLedgerTenant}
+        onClose={() => setSelectedLedgerTenant(null)}
+        tenant={selectedLedgerTenant}
+      />
+
+      {/* Feature: High-Security Destructive Action Confirmation */}
+      <DestructiveConfirmationModal
+        isOpen={!!deletingTenant}
+        onClose={() => setDeletingTenant(null)}
+        onConfirm={handleConfirmDeleteTenant}
+        title="Archive Tenant Profile"
+        itemName={deletingTenant?.name || ''}
+        itemType="Tenant"
+        warningDetails="This will soft-delete the tenant record. Their historical invoices and payment logs will remain auditable in financial statements."
+      />
     </div>
   );
 };

@@ -13,7 +13,8 @@ use crate::db::{db_export_all, db_import_all, DatabaseManager};
 use crate::oauth::AuthState;
 
 const SALT: &[u8] = b"rentflow_appdata_gcm_salt_v2";
-const APP_DATA_BACKUP_FILENAME: &str = "RentFlowBackup.enc";
+const APP_DATA_BACKUP_FILENAME: &str = "RentFlow_FullBackup.enc";
+const LEGACY_BACKUP_FILENAME: &str = "RentFlowBackup.enc";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BackupSyncResult {
@@ -84,6 +85,7 @@ fn decrypt_payload(encrypted_bytes: &[u8], google_id: &str) -> Result<String, St
 
 async fn find_drive_backup_file(token: &str) -> Result<Option<String>, String> {
     let client = reqwest::Client::new();
+    // 1. Primary RentFlow_FullBackup.enc
     let res = client
         .get("https://www.googleapis.com/drive/v3/files")
         .header("Authorization", format!("Bearer {}", token))
@@ -96,16 +98,36 @@ async fn find_drive_backup_file(token: &str) -> Result<Option<String>, String> {
         .await
         .map_err(|e| format!("Drive query error: {}", e))?;
 
-    if !res.status().is_success() {
-        return Ok(None);
+    if res.status().is_success() {
+        if let Ok(list) = res.json::<DriveFileList>().await {
+            if let Some(first) = list.files.first() {
+                return Ok(Some(first.id.clone()));
+            }
+        }
     }
 
-    let list: DriveFileList = res
-        .json()
+    // 2. Fallback check for legacy RentFlowBackup.enc
+    let res_legacy = client
+        .get("https://www.googleapis.com/drive/v3/files")
+        .header("Authorization", format!("Bearer {}", token))
+        .query(&[
+            ("spaces", "appDataFolder"),
+            ("q", &format!("name = '{}' and trashed = false", LEGACY_BACKUP_FILENAME)),
+            ("fields", "files(id, name)"),
+        ])
+        .send()
         .await
-        .map_err(|e| format!("Failed to parse Drive list: {}", e))?;
+        .map_err(|e| format!("Drive query error: {}", e))?;
 
-    Ok(list.files.first().map(|f| f.id.clone()))
+    if res_legacy.status().is_success() {
+        if let Ok(list) = res_legacy.json::<DriveFileList>().await {
+            if let Some(first) = list.files.first() {
+                return Ok(Some(first.id.clone()));
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 #[tauri::command]
@@ -272,8 +294,9 @@ pub async fn drive_pull_backup(
     let parsed: serde_json::Value = serde_json::from_str(&decrypted_str)
         .map_err(|e| format!("Failed to parse decrypted JSON: {}", e))?;
 
-    if let Some(data_obj) = parsed.get("data") {
-        db_import_all(data_obj.clone(), db_state.clone()).await?;
+    let data_to_import = parsed.get("tables").or_else(|| parsed.get("data")).cloned();
+    if let Some(data_obj) = data_to_import {
+        db_import_all(data_obj, db_state.clone()).await?;
         return Ok(DrivePullResult {
             restored: true,
             message: "Successfully restored data from Google Drive into SQLCipher database".into(),

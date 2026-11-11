@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
 import { db } from '../../db/client';
-import { Property, Unit, RentIncrease } from '../../db/schema';
+import { Property, Unit, Lease, RentIncrease } from '../../db/schema';
 import { usePack } from '../../countries/usePack';
 import { formatMoney } from '../../lib/money';
 import { generateUUID } from '../../lib/uuid';
-import { sanitizeCoordinates } from '../../lib/geo';
+import { sanitizeCoordinates, geocodeAddress } from '../../lib/geo';
 import { useToast } from '../../components/toast/ToastContext';
 import { Card, CardHeader, CardTitle } from '../../components/ui/Card';
 import { Badge } from '../../components/ui/Badge';
@@ -27,6 +27,8 @@ import {
   MoreVertical,
   CheckCircle2,
 } from '../../components/icons';
+import { RentIncreaseModal } from './RentIncreaseModal';
+import { DestructiveConfirmationModal } from '../../components/ui/DestructiveConfirmationModal';
 
 export const PropertiesView: React.FC = () => {
   const pack = usePack();
@@ -34,11 +36,13 @@ export const PropertiesView: React.FC = () => {
 
   const [properties, setProperties] = useState<Property[]>(() => db.getTable<Property>('properties'));
   const [units, setUnits] = useState<Unit[]>(() => db.getTable<Unit>('units'));
+  const [leases, setLeases] = useState<Lease[]>(() => db.getTable<Lease>('leases'));
   const [selectedPropId, setSelectedPropId] = useState<string | null>(properties[0]?.id || null);
 
   // Property Modals
   const [isAddPropOpen, setIsAddPropOpen] = useState(false);
   const [editingProp, setEditingProp] = useState<Property | null>(null);
+  const [deletingProp, setDeletingProp] = useState<Property | null>(null);
 
   React.useEffect(() => {
     const handler = () => setIsAddPropOpen(true);
@@ -49,6 +53,7 @@ export const PropertiesView: React.FC = () => {
   // Unit Modals
   const [isAddUnitOpen, setIsAddUnitOpen] = useState(false);
   const [editingUnit, setEditingUnit] = useState<Unit | null>(null);
+  const [rentHistoryUnit, setRentHistoryUnit] = useState<Unit | null>(null);
 
   // Form states - Property
   const [propName, setPropName] = useState('');
@@ -58,6 +63,7 @@ export const PropertiesView: React.FC = () => {
   const [propNotes, setPropNotes] = useState('');
   const [propLat, setPropLat] = useState('');
   const [propLng, setPropLng] = useState('');
+  const [isGeocoding, setIsGeocoding] = useState(false);
 
   // Form states - Unit
   const [unitName, setUnitName] = useState('');
@@ -78,7 +84,29 @@ export const PropertiesView: React.FC = () => {
     setPropLng(p.longitude ? String(p.longitude) : p.lng ? String(p.lng) : '');
   };
 
-  const handleSaveProperty = (e: React.FormEvent) => {
+  const handleManualGeocode = async () => {
+    if (!propAddress.trim() && !propCity.trim()) {
+      showToast({ type: 'info', message: 'Please enter street address or city to locate on map.' });
+      return;
+    }
+    setIsGeocoding(true);
+    try {
+      const coords = await geocodeAddress(propAddress.trim(), propCity.trim(), pack.code);
+      if (coords) {
+        setPropLat(coords.lat.toFixed(5));
+        setPropLng(coords.lng.toFixed(5));
+        showToast({ type: 'success', message: `Found coordinates: ${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}` });
+      } else {
+        showToast({ type: 'error', message: 'Could not resolve coordinates for this address.' });
+      }
+    } catch {
+      showToast({ type: 'error', message: 'Geocoding failed. Please check network connection.' });
+    } finally {
+      setIsGeocoding(false);
+    }
+  };
+
+  const handleSaveProperty = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!propName.trim()) {
       showToast({ type: 'error', message: 'Property name is required!' });
@@ -105,6 +133,22 @@ export const PropertiesView: React.FC = () => {
       if (!isNaN(parsedLng) && parsedLng >= -180 && parsedLng <= 180) lngVal = parsedLng;
     }
 
+    // Auto-geocode via OpenStreetMap Nominatim if coordinates were left blank
+    if (latVal === null || lngVal === null) {
+      setIsGeocoding(true);
+      try {
+        const autoCoords = await geocodeAddress(propAddress.trim(), propCity.trim(), pack.code);
+        if (autoCoords) {
+          latVal = autoCoords.lat;
+          lngVal = autoCoords.lng;
+        }
+      } catch (err) {
+        console.warn('Auto-geocoding property failed:', err);
+      } finally {
+        setIsGeocoding(false);
+      }
+    }
+
     if (editingProp) {
       db.updateItem<Property>('properties', editingProp.id, {
         name: propName.trim(),
@@ -118,6 +162,7 @@ export const PropertiesView: React.FC = () => {
         lat: latVal,
         lng: lngVal,
       });
+      db.notifyWrite();
       showToast({ type: 'success', message: `Property "${propName}" updated` });
       setEditingProp(null);
     } else {
@@ -136,7 +181,8 @@ export const PropertiesView: React.FC = () => {
         lat: latVal,
         lng: lngVal,
       });
-      showToast({ type: 'success', message: `Property "${created.name}" created` });
+      db.notifyWrite();
+      showToast({ type: 'success', message: `Property "${created.name}" created and placed on map` });
       setIsAddPropOpen(false);
       setSelectedPropId(created.id);
     }
@@ -155,24 +201,27 @@ export const PropertiesView: React.FC = () => {
     const unsub = db.onWrite(() => {
       setProperties(db.getTable<Property>('properties'));
       setUnits(db.getTable<Unit>('units'));
+      setLeases(db.getTable<Lease>('leases'));
     });
     return unsub;
   }, []);
 
-  const handleDeleteProp = (p: Property) => {
-    const success = db.deletePropertyCascading(p.id);
+  const handleConfirmDeleteProp = () => {
+    if (!deletingProp) return;
+    const success = db.deletePropertyCascading(deletingProp.id);
     if (success) {
       const remainingProps = db.getTable<Property>('properties');
       setProperties(remainingProps);
       setUnits(db.getTable<Unit>('units'));
-      if (selectedPropId === p.id) {
+      if (selectedPropId === deletingProp.id) {
         setSelectedPropId(remainingProps[0]?.id || null);
       }
       showToast({
         type: 'info',
-        message: `Property "${p.name}" and associated units archived`,
+        message: `Property "${deletingProp.name}" and associated units archived`,
       });
     }
+    setDeletingProp(null);
   };
 
   const handleOpenEditUnit = (u: Unit) => {
@@ -257,11 +306,16 @@ export const PropertiesView: React.FC = () => {
     }
   };
 
+  const activeLeaseUnitIds = new Set(
+    leases.filter((l) => l.status === 'active' && !l.deleted_at && !(l as any).deletedAt).map((l) => l.unit_id)
+  );
+  const isUnitOccupied = (u: Unit) => u.status === 'occupied' || activeLeaseUnitIds.has(u.id);
+
   const activeProp = properties.find((p) => p.id === selectedPropId);
   const propUnits = units.filter((u) => u.property_id === selectedPropId);
-  const occupiedCount = propUnits.filter((u) => u.status === 'occupied').length;
+  const occupiedCount = propUnits.filter(isUnitOccupied).length;
   const occupancyPct = propUnits.length > 0 ? Math.round((occupiedCount / propUnits.length) * 100) : 0;
-  const totalRentMinor = propUnits.reduce((acc, u) => acc + (u.status === 'occupied' ? u.rent_minor : 0), 0);
+  const totalRentMinor = propUnits.reduce((acc, u) => acc + (isUnitOccupied(u) ? u.rent_minor : 0), 0);
 
   return (
     <div className="space-y-8">
@@ -316,70 +370,95 @@ export const PropertiesView: React.FC = () => {
           </div>
 
           <div className="space-y-3">
-            {properties.map((p) => {
-              const isSelected = p.id === selectedPropId;
-              const count = units.filter((u) => u.property_id === p.id).length;
-              const propOccupied = units.filter((u) => u.property_id === p.id && u.status === 'occupied').length;
-              const occRate = count > 0 ? Math.round((propOccupied / count) * 100) : 0;
-
-              return (
-                <div
-                  key={p.id}
-                  onClick={() => setSelectedPropId(p.id)}
-                  className={`p-4 rounded-2xl border transition-all cursor-pointer ${
-                    isSelected
-                      ? 'border-[var(--accent)] bg-[var(--bg-surface)] card-shadow ring-1 ring-[var(--accent)]/30'
-                      : 'border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-[var(--border-strong)]'
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-start gap-3">
-                      <div className="w-10 h-10 rounded-xl bg-[var(--accent-subtle)] text-[var(--accent)] flex items-center justify-center shrink-0">
-                        <Building2 className="w-5 h-5" />
-                      </div>
-                      <div>
-                        <h3 className="text-sm font-bold text-[var(--text-primary)]">{p.name}</h3>
-                        <p className="text-xs text-[var(--text-secondary)] flex items-center gap-1 mt-0.5 line-clamp-1">
-                          <MapPin className="w-3 h-3 text-[var(--text-subtle)] shrink-0" />
-                          <span>{p.address_line1 || p.address || 'No address set'}</span>
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-1 shrink-0">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleOpenEditProp(p);
-                        }}
-                        className="w-7 h-7 rounded-lg flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--accent)] hover:bg-[var(--bg-base)] cursor-pointer"
-                        title="Edit Property"
-                      >
-                        <Pencil className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeleteProp(p);
-                        }}
-                        className="w-7 h-7 rounded-lg flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--status-danger-fg)] hover:bg-[var(--bg-base)] cursor-pointer"
-                        title="Archive Property"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Property Quick Metrics */}
-                  <div className="flex items-center justify-between pt-3 mt-3 border-t border-[var(--border-subtle)] text-xs text-[var(--text-secondary)]">
-                    <span className="font-medium">{count} Units</span>
-                    <Badge variant={occRate >= 80 ? 'success' : occRate > 0 ? 'warning' : 'neutral'}>
-                      {occRate}% Occupied
-                    </Badge>
-                  </div>
+            {properties.length === 0 ? (
+              <div className="p-8 text-center rounded-2xl border border-dashed border-[var(--border-strong)] bg-[var(--bg-surface)] space-y-3">
+                <div className="w-12 h-12 rounded-2xl bg-[var(--accent-subtle)] text-[var(--accent)] flex items-center justify-center mx-auto">
+                  <Building2 className="w-6 h-6" />
                 </div>
-              );
-            })}
+                <h4 className="text-sm font-bold text-[var(--text-primary)]">No Properties Registered</h4>
+                <p className="text-xs text-[var(--text-secondary)] max-w-xs mx-auto leading-relaxed">
+                  Add your first building, multi-family complex, or commercial rental to start managing units and leases.
+                </p>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => {
+                    setPropName('');
+                    setPropAddress('');
+                    setIsAddPropOpen(true);
+                  }}
+                  className="gap-2 mx-auto"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>+ Add Property</span>
+                </Button>
+              </div>
+            ) : (
+              properties.map((p) => {
+                const isSelected = p.id === selectedPropId;
+                const count = units.filter((u) => u.property_id === p.id).length;
+                const propOccupied = units.filter((u) => u.property_id === p.id && isUnitOccupied(u)).length;
+                const occRate = count > 0 ? Math.round((propOccupied / count) * 100) : 0;
+
+                return (
+                  <div
+                    key={p.id}
+                    onClick={() => setSelectedPropId(p.id)}
+                    className={`p-4 rounded-2xl border transition-all cursor-pointer ${
+                      isSelected
+                        ? 'border-[var(--accent)] bg-[var(--bg-surface)] card-shadow ring-1 ring-[var(--accent)]/30'
+                        : 'border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-[var(--border-strong)]'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-start gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-[var(--accent-subtle)] text-[var(--accent)] flex items-center justify-center shrink-0">
+                          <Building2 className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h3 className="text-sm font-bold text-[var(--text-primary)]">{p.name}</h3>
+                          <p className="text-xs text-[var(--text-secondary)] flex items-center gap-1 mt-0.5 line-clamp-1">
+                            <MapPin className="w-3 h-3 text-[var(--text-subtle)] shrink-0" />
+                            <span>{p.address_line1 || p.address || 'No address set'}</span>
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleOpenEditProp(p);
+                          }}
+                          className="w-7 h-7 rounded-lg flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--accent)] hover:bg-[var(--bg-base)] cursor-pointer"
+                          title="Edit Property"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDeletingProp(p);
+                          }}
+                          className="w-7 h-7 rounded-lg flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--status-danger-fg)] hover:bg-[var(--bg-base)] cursor-pointer"
+                          title="Archive Property"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Property Quick Metrics */}
+                    <div className="flex items-center justify-between pt-3 mt-3 border-t border-[var(--border-subtle)] text-xs text-[var(--text-secondary)]">
+                      <span className="font-medium">{count} Units</span>
+                      <Badge variant={occRate >= 80 ? 'success' : occRate > 0 ? 'warning' : 'neutral'}>
+                        {occRate}% Occupied
+                      </Badge>
+                    </div>
+                  </div>
+                );
+              })
+            )}
           </div>
         </div>
 
@@ -425,8 +504,10 @@ export const PropertiesView: React.FC = () => {
                 </div>
               ) : (
                 propUnits.map((u) => {
+                  const unitOccupied = isUnitOccupied(u);
+                  const displayStatus = unitOccupied ? 'occupied' : u.status;
                   const statusVariant =
-                    u.status === 'occupied' ? 'success' : u.status === 'vacant' ? 'warning' : 'danger';
+                    displayStatus === 'occupied' ? 'success' : displayStatus === 'vacant' ? 'warning' : 'danger';
 
                   return (
                     <div
@@ -436,7 +517,14 @@ export const PropertiesView: React.FC = () => {
                       <div className="flex items-center justify-between">
                         <span className="font-bold text-sm text-[var(--text-primary)]">{u.name}</span>
                         <div className="flex items-center gap-1.5">
-                          <Badge variant={statusVariant}>{u.status.toUpperCase()}</Badge>
+                          <Badge variant={statusVariant}>{displayStatus.toUpperCase()}</Badge>
+                          <button
+                            onClick={() => setRentHistoryUnit(u)}
+                            className="w-7 h-7 rounded-lg flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--accent)] hover:bg-[var(--bg-surface)] cursor-pointer"
+                            title="Rent Increase History & Notice Compliance"
+                          >
+                            <TrendingUp className="w-3.5 h-3.5" />
+                          </button>
                           <button
                             onClick={() => handleOpenEditUnit(u)}
                             className="w-7 h-7 rounded-lg flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--accent)] hover:bg-[var(--bg-surface)] cursor-pointer"
@@ -529,23 +617,42 @@ export const PropertiesView: React.FC = () => {
             </Select>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Input
-              label="Latitude (for Map pin)"
-              type="number"
-              step="any"
-              value={propLat}
-              onChange={(e) => setPropLat(e.target.value)}
-              placeholder="e.g. 39.7817"
-            />
-            <Input
-              label="Longitude (for Map pin)"
-              type="number"
-              step="any"
-              value={propLng}
-              onChange={(e) => setPropLng(e.target.value)}
-              placeholder="e.g. -89.6501"
-            />
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-[var(--text-secondary)]">
+                Map Location & Coordinates
+              </span>
+              <button
+                type="button"
+                onClick={handleManualGeocode}
+                disabled={isGeocoding}
+                className="text-xs text-[var(--accent)] hover:underline flex items-center gap-1 font-medium cursor-pointer disabled:opacity-50"
+              >
+                <MapPin className="w-3.5 h-3.5" />
+                <span>{isGeocoding ? 'Locating...' : 'Locate Address on Map'}</span>
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Input
+                label="Latitude"
+                type="number"
+                step="any"
+                value={propLat}
+                onChange={(e) => setPropLat(e.target.value)}
+                placeholder="Auto-detected if blank"
+              />
+              <Input
+                label="Longitude"
+                type="number"
+                step="any"
+                value={propLng}
+                onChange={(e) => setPropLng(e.target.value)}
+                placeholder="Auto-detected if blank"
+              />
+            </div>
+            <p className="text-[11px] text-[var(--text-subtle)]">
+              Coordinates will be automatically resolved via OpenStreetMap geocoding when you save.
+            </p>
           </div>
 
           <Input
@@ -651,6 +758,26 @@ export const PropertiesView: React.FC = () => {
           </div>
         </form>
       </Modal>
+
+      {/* Feature: Unit Rent Increase History & Notice Period Validation */}
+      <RentIncreaseModal
+        isOpen={!!rentHistoryUnit}
+        onClose={() => setRentHistoryUnit(null)}
+        unit={rentHistoryUnit}
+        property={properties.find((p) => p.id === rentHistoryUnit?.property_id) || null}
+        onUpdate={() => setUnits(db.getTable<Unit>('units'))}
+      />
+
+      {/* Feature: High-Security Destructive Action Confirmation */}
+      <DestructiveConfirmationModal
+        isOpen={!!deletingProp}
+        onClose={() => setDeletingProp(null)}
+        onConfirm={handleConfirmDeleteProp}
+        title="Archive Property & Associated Units"
+        itemName={deletingProp?.name || ''}
+        itemType="Property"
+        warningDetails="This will cascade and soft-delete all rental units, active leases, invoices, and payment records associated with this property."
+      />
     </div>
   );
 };

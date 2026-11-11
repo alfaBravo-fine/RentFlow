@@ -1,18 +1,13 @@
 /**
  * RentFlow Tauri v2 Desktop Bridge
- * Seamlessly interfaces React frontend with the Rust backend (SQLCipher & Loopback OAuth)
+ * Seamlessly interfaces React frontend with the Rust backend (SQLite/SQLCipher & Loopback OAuth)
  * when running inside Tauri, with graceful web/browser fallback.
  */
 
+import { Invoice, Lease, Payment, Property, Tenant, Unit } from '../../db/schema';
+
 export function isTauri(): boolean {
-  return (
-    typeof window !== 'undefined' &&
-    Boolean(
-      (window as any).__TAURI_INTERNALS__ ||
-      (window as any).__TAURI__ ||
-      (window as any).__TAURI_METADATA__
-    )
-  );
+  return typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__ !== undefined;
 }
 
 async function invokeTauri<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -29,7 +24,7 @@ async function invokeTauri<T>(cmd: string, args?: Record<string, unknown>): Prom
   }
 }
 
-// --- Database Operations (SQLCipher AES-256) ---
+// --- Database Operations (SQLite / SQLCipher AES-256) ---
 
 export async function tauriDbGetTable<T>(tableName: string): Promise<T[]> {
   return invokeTauri<T[]>('db_get_table', { tableName });
@@ -73,6 +68,189 @@ export async function tauriDbImportAll(data: Record<string, any[]>): Promise<voi
 
 export async function tauriBackupDatabaseFile(destinationPath: string): Promise<string> {
   return invokeTauri<string>('db_backup_file', { destinationPath });
+}
+
+// --- Typed Domain SQLite Commands & Transactions ---
+
+export async function tauriGetProperties(): Promise<Property[]> {
+  return invokeTauri<Property[]>('get_properties');
+}
+
+export async function tauriAddProperty(property: Property): Promise<Property> {
+  return invokeTauri<Property>('add_property', { property });
+}
+
+export async function tauriUpdateProperty(id: string, property: Partial<Property>): Promise<Property> {
+  return invokeTauri<Property>('update_property', { id, property });
+}
+
+export async function tauriDeleteProperty(id: string): Promise<void> {
+  return invokeTauri<void>('delete_property', { id });
+}
+
+export async function tauriGetUnits(): Promise<Unit[]> {
+  return invokeTauri<Unit[]>('get_units');
+}
+
+export async function tauriAddUnit(unit: Unit): Promise<Unit> {
+  return invokeTauri<Unit>('add_unit', { unit });
+}
+
+export async function tauriUpdateUnit(id: string, unit: Partial<Unit>): Promise<Unit> {
+  return invokeTauri<Unit>('update_unit', { id, unit });
+}
+
+export async function tauriDeleteUnit(id: string): Promise<void> {
+  return invokeTauri<void>('delete_unit', { id });
+}
+
+export async function tauriGetTenants(): Promise<Tenant[]> {
+  return invokeTauri<Tenant[]>('get_tenants');
+}
+
+export async function tauriAddTenant(tenant: Tenant): Promise<Tenant> {
+  return invokeTauri<Tenant>('add_tenant', { tenant });
+}
+
+export async function tauriUpdateTenant(id: string, tenant: Partial<Tenant>): Promise<Tenant> {
+  return invokeTauri<Tenant>('update_tenant', { id, tenant });
+}
+
+export async function tauriDeleteTenant(id: string): Promise<void> {
+  return invokeTauri<void>('delete_tenant', { id });
+}
+
+export async function tauriGetLeases(): Promise<Lease[]> {
+  return invokeTauri<Lease[]>('get_leases');
+}
+
+export async function tauriAddLease(lease: Lease): Promise<Lease> {
+  return invokeTauri<Lease>('add_lease', { lease });
+}
+
+export async function tauriUpdateLease(id: string, lease: Partial<Lease>): Promise<Lease> {
+  return invokeTauri<Lease>('update_lease', { id, lease });
+}
+
+export async function tauriDeleteLease(id: string): Promise<void> {
+  return invokeTauri<void>('delete_lease', { id });
+}
+
+export async function tauriGetInvoices(): Promise<Invoice[]> {
+  return invokeTauri<Invoice[]>('get_invoices');
+}
+
+export async function tauriAddInvoice(invoice: Invoice): Promise<Invoice> {
+  return invokeTauri<Invoice>('add_invoice', { invoice });
+}
+
+export async function tauriUpdateInvoice(id: string, invoice: Partial<Invoice>): Promise<Invoice> {
+  return invokeTauri<Invoice>('update_invoice', { id, invoice });
+}
+
+export async function tauriDeleteInvoice(id: string): Promise<void> {
+  return invokeTauri<void>('delete_invoice', { id });
+}
+
+export async function tauriGetPayments(): Promise<Payment[]> {
+  return invokeTauri<Payment[]>('get_payments');
+}
+
+export async function tauriAddPayment(payment: Payment): Promise<Payment> {
+  return invokeTauri<Payment>('add_payment', { payment });
+}
+
+export async function tauriRecordPaymentTransaction(
+  invoiceId: string,
+  paymentId: string,
+  amountMinor: number,
+  method: string,
+  reference?: string
+): Promise<{ payment: Payment; invoice: Invoice }> {
+  return invokeTauri<{ payment: Payment; invoice: Invoice }>('record_payment_transaction', {
+    invoiceId,
+    paymentId,
+    amountMinor,
+    method,
+    reference: reference || null,
+  });
+}
+
+// --- Expenses ---
+export async function tauriGetExpenses(): Promise<any[]> {
+  return invokeTauri<any[]>('get_expenses');
+}
+
+export async function tauriAddExpense(expense: any): Promise<any> {
+  return invokeTauri<any>('add_expense', { expense });
+}
+
+export async function tauriUpdateExpense(id: string, expense: any): Promise<any> {
+  return invokeTauri<any>('update_expense', { id, expense });
+}
+
+export async function tauriDeleteExpense(id: string): Promise<void> {
+  return invokeTauri<void>('delete_expense', { id });
+}
+
+// --- Maintenance Requests ---
+export async function tauriGetMaintenanceRequests(): Promise<any[]> {
+  return invokeTauri<any[]>('get_maintenance_requests');
+}
+
+export async function tauriAddMaintenanceRequest(request: any): Promise<any> {
+  return invokeTauri<any>('add_maintenance_request', { request });
+}
+
+export async function tauriUpdateMaintenanceRequest(id: string, request: any): Promise<any> {
+  return invokeTauri<any>('update_maintenance_request', { id, request });
+}
+
+export async function tauriDeleteMaintenanceRequest(id: string): Promise<void> {
+  return invokeTauri<void>('delete_maintenance_request', { id });
+}
+
+// --- Vendors ---
+export async function tauriGetVendors(): Promise<any[]> {
+  return invokeTauri<any[]>('get_vendors');
+}
+
+export async function tauriAddVendor(vendor: any): Promise<any> {
+  return invokeTauri<any>('add_vendor', { vendor });
+}
+
+export async function tauriUpdateVendor(id: string, vendor: any): Promise<any> {
+  return invokeTauri<any>('update_vendor', { id, vendor });
+}
+
+export async function tauriDeleteVendor(id: string): Promise<void> {
+  return invokeTauri<void>('delete_vendor', { id });
+}
+
+// --- Credits ---
+export async function tauriGetCredits(): Promise<any[]> {
+  return invokeTauri<any[]>('get_credits');
+}
+
+export async function tauriAddCredit(credit: any): Promise<any> {
+  return invokeTauri<any>('add_credit', { credit });
+}
+
+// --- Settings & Path ---
+export async function tauriGetSettings(): Promise<Record<string, any>> {
+  return invokeTauri<Record<string, any>>('get_settings');
+}
+
+export async function tauriSaveSetting(key: string, value: any): Promise<void> {
+  return invokeTauri<void>('save_setting', { key, value });
+}
+
+export async function tauriSaveSettings(settings: Record<string, any>): Promise<void> {
+  return invokeTauri<void>('save_settings', { settings });
+}
+
+export async function tauriGetAppDataPath(): Promise<string> {
+  return invokeTauri<string>('get_app_data_path');
 }
 
 // --- Production Google OAuth (Desktop Loopback) ---

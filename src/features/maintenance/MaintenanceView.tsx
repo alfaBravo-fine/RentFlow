@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { db } from '../../db/client';
-import { MaintenanceRequest, Unit, Vendor, Expense } from '../../db/schema';
+import { MaintenanceRequest, Unit, Vendor, Expense, Property } from '../../db/schema';
 import { usePack } from '../../countries/usePack';
 import { formatMoney } from '../../lib/money';
 import { generateUUID } from '../../lib/uuid';
@@ -28,10 +28,17 @@ export const MaintenanceView: React.FC = () => {
   const pack = usePack();
   const { showToast } = useToast();
   const [requests, setRequests] = useState<MaintenanceRequest[]>(() =>
-    db.getTable<MaintenanceRequest>('maintenance_requests').filter((m) => !m.deleted_at)
+    db.getTable<MaintenanceRequest>('maintenance_requests').filter((m) => !m.deleted_at && !(m as any).deletedAt)
   );
-  const units = db.getTable<Unit>('units').filter((u) => !u.deleted_at);
-  const vendors = db.getTable<Vendor>('vendors').filter((v) => !v.deleted_at);
+
+  // Strict filtering for active properties and units (deletedAt == null)
+  const properties = db.getTable<Property>('properties').filter((p) => !p.deleted_at && !(p as any).deletedAt);
+  const activePropertyIds = new Set(properties.map((p) => p.id));
+  const propertyMap = new Map(properties.map((p) => [p.id, p]));
+  const units = db.getTable<Unit>('units').filter(
+    (u) => !u.deleted_at && !(u as any).deletedAt && activePropertyIds.has(u.property_id)
+  );
+  const vendors = db.getTable<Vendor>('vendors').filter((v) => !v.deleted_at && !(v as any).deletedAt);
 
   const approvalThresholdMinor = Number(
     localStorage.getItem('rentflow_maintenance_approval_threshold_minor') || '50000'
@@ -338,11 +345,20 @@ export const MaintenanceView: React.FC = () => {
             value={unitId}
             onChange={(e) => setUnitId(e.target.value)}
           >
-            {units.map((u) => (
-              <option key={u.id} value={u.id}>
-                {u.name}
+            {units.length === 0 ? (
+              <option value="" disabled>
+                No active units available
               </option>
-            ))}
+            ) : (
+              units.map((u) => {
+                const prop = propertyMap.get(u.property_id);
+                return (
+                  <option key={u.id} value={u.id}>
+                    {u.name} {prop ? `(${prop.name})` : ''}
+                  </option>
+                );
+              })
+            )}
           </Select>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

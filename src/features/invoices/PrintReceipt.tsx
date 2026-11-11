@@ -4,8 +4,10 @@ import { CountryPack } from '../../countries/types';
 import { formatMoney } from '../../lib/money';
 import { formatDate } from '../../lib/format';
 import { formatInvoiceNumber } from '../../lib/formatNames';
-import { Printer, Download, X, FileText, CheckCircle2 } from '../../components/icons';
+import { printReceiptDocument } from '../../lib/pdf';
+import { Printer, X, FileText, CheckCircle2 } from '../../components/icons';
 import { Button } from '../../components/ui/Button';
+import { handlePrint as triggerSystemPrint } from '../../lib/print';
 
 export interface PrintReceiptProps {
   organization: Organization;
@@ -34,7 +36,7 @@ export const PrintReceipt: React.FC<PrintReceiptProps> = ({
   const paidDate = payment ? formatDate(payment.paid_at, pack) : formatDate(invoice.due_date, pack);
 
   const handlePrint = () => {
-    window.print();
+    triggerSystemPrint();
   };
 
   return (
@@ -76,7 +78,7 @@ export const PrintReceipt: React.FC<PrintReceiptProps> = ({
       </div>
 
       {/* 800px Paper-Styled Sheet */}
-      <div className="print-container w-full max-w-[800px] bg-white text-[#111827] rounded-2xl print:rounded-none paper-shadow p-10 sm:p-12 font-[Inter,system-ui,sans-serif] my-auto space-y-8">
+      <div className="print-area print-container w-full max-w-[800px] bg-white text-[#111827] rounded-2xl print:rounded-none paper-shadow p-10 sm:p-12 font-[Inter,system-ui,sans-serif] my-auto space-y-8">
         {/* Header: Company & 32px Prominent INVOICE / RECEIPT Title */}
         <div className="flex justify-between items-start pb-6 border-b border-[#E5E7EB] gap-6">
           {/* Left: Company Details */}

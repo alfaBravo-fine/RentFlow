@@ -4,9 +4,9 @@ import { Lease, Tenant, Unit, Deposit, Property } from '../../db/schema';
 import { usePack } from '../../countries/usePack';
 import { formatMoney } from '../../lib/money';
 import { accrueDepositInterest } from '../../lib/interest';
-import { formatDate } from '../../lib/format';
 import { formatLeaseName } from '../../lib/formatNames';
 import { generateUUID } from '../../lib/uuid';
+import { generateFirstInvoice } from '../../lib/invoicing';
 import { useToast } from '../../components/toast/ToastContext';
 import { Card } from '../../components/ui/Card';
 import { Badge } from '../../components/ui/Badge';
@@ -29,7 +29,9 @@ import {
   List,
   Building2,
   Users,
+  FileCheck,
 } from '../../components/icons';
+import { LeaseChecklistModal } from './LeaseChecklistModal';
 
 export const LeasesView: React.FC = () => {
   const pack = usePack();
@@ -47,6 +49,7 @@ export const LeasesView: React.FC = () => {
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingLease, setEditingLease] = useState<Lease | null>(null);
+  const [checklistLease, setChecklistLease] = useState<Lease | null>(null);
 
   // Form states
   const [unitId, setUnitId] = useState(validUnits[0]?.id || '');
@@ -76,6 +79,15 @@ export const LeasesView: React.FC = () => {
     const handleOutside = () => setActiveMenuId(null);
     window.addEventListener('click', handleOutside);
     return () => window.removeEventListener('click', handleOutside);
+  }, []);
+
+  // Subscribe to reactive DB writes so Leases stay synchronized
+  useEffect(() => {
+    const unsub = db.onWrite(() => {
+      setLeases(db.getTable<Lease>('leases'));
+      setDeposits(db.getTable<Deposit>('deposits'));
+    });
+    return unsub;
   }, []);
 
   const handleOpenAdd = () => {
@@ -143,7 +155,8 @@ export const LeasesView: React.FC = () => {
     const humanTitle = formatLeaseName(selectedTenant?.name, selectedUnit?.name);
 
     if (editingLease) {
-      db.updateItem<Lease>('leases', editingLease.id, {
+      const prevUnitId = editingLease.unit_id;
+      const updatedLease = db.updateItem<Lease>('leases', editingLease.id, {
         unit_id: unitId,
         tenant_id: tenantId,
         start_date: startDate,
@@ -154,10 +167,26 @@ export const LeasesView: React.FC = () => {
         deposit_minor: depMinor,
         status: leaseStatus,
       });
+
+      // Synchronize unit occupancy
+      if (leaseStatus === 'active') {
+        db.updateItem<Unit>('units', unitId, { status: 'occupied' });
+        try {
+          generateFirstInvoice(updatedLease);
+        } catch (err) {
+          console.error('generateFirstInvoice failed during lease update:', err);
+        }
+      } else {
+        db.syncUnitOccupancy(unitId);
+      }
+      if (prevUnitId && prevUnitId !== unitId) {
+        db.syncUnitOccupancy(prevUnitId);
+      }
+
       showToast({ type: 'success', message: `Lease "${humanTitle}" updated` });
     } else {
       const leaseId = generateUUID();
-      db.insertItem<Lease>('leases', {
+      const savedLease = db.insertItem<Lease>('leases', {
         id: leaseId,
         unit_id: unitId,
         tenant_id: tenantId,
@@ -176,6 +205,20 @@ export const LeasesView: React.FC = () => {
         status: leaseStatus,
       });
 
+      // Automatically update linked unit status
+      if (leaseStatus === 'active') {
+        db.updateItem<Unit>('units', unitId, { status: 'occupied' });
+
+        // Trigger First Invoice Generation immediately after the lease is saved
+        try {
+          generateFirstInvoice(savedLease);
+        } catch (err) {
+          console.error('generateFirstInvoice failed during lease creation:', err);
+        }
+      } else {
+        db.syncUnitOccupancy(unitId);
+      }
+
       if (depMinor > 0) {
         db.insertItem<Deposit>('deposits', {
           id: generateUUID(),
@@ -191,6 +234,7 @@ export const LeasesView: React.FC = () => {
       showToast({ type: 'success', message: `New lease "${humanTitle}" created` });
     }
 
+    db.notifyWrite();
     setLeases(db.getTable<Lease>('leases'));
     setDeposits(db.getTable<Deposit>('deposits'));
     setIsModalOpen(false);
@@ -205,6 +249,8 @@ export const LeasesView: React.FC = () => {
 
     const success = db.softDeleteItem<Lease>('leases', l.id);
     if (success) {
+      db.syncUnitOccupancy(l.unit_id);
+      db.notifyWrite();
       setLeases(db.getTable<Lease>('leases'));
       setDeletingLease(null);
       showToast({
@@ -212,6 +258,12 @@ export const LeasesView: React.FC = () => {
         message: `Lease "${humanTitle}" archived`,
         onUndo: () => {
           db.updateItem<Lease>('leases', l.id, { deleted_at: null });
+          if (l.status === 'active') {
+            db.updateItem<Unit>('units', l.unit_id, { status: 'occupied' });
+          } else {
+            db.syncUnitOccupancy(l.unit_id);
+          }
+          db.notifyWrite();
           setLeases(db.getTable<Lease>('leases'));
           showToast({ type: 'success', message: `Restored lease "${humanTitle}"` });
         },
@@ -436,6 +488,16 @@ export const LeasesView: React.FC = () => {
                           <button
                             onClick={() => {
                               setActiveMenuId(null);
+                              setChecklistLease(lease);
+                            }}
+                            className="w-full px-3.5 py-2 text-left text-xs text-[var(--text-primary)] hover:bg-[var(--bg-base)] flex items-center gap-2 cursor-pointer"
+                          >
+                            <FileCheck className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>Move-In / Move-Out Checklist</span>
+                          </button>
+                          <button
+                            onClick={() => {
+                              setActiveMenuId(null);
                               setDeductionLeaseId(lease.id);
                               setIsDeductionModalOpen(true);
                             }}
@@ -567,6 +629,13 @@ export const LeasesView: React.FC = () => {
                       </td>
                       <td className="py-3 px-6 text-right">
                         <div className="flex items-center justify-end gap-1.5">
+                          <button
+                            onClick={() => setChecklistLease(lease)}
+                            className="p-1.5 rounded-lg text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/30 transition-colors cursor-pointer"
+                            title="Move-In / Move-Out Inspection Checklist"
+                          >
+                            <FileCheck className="w-4 h-4" />
+                          </button>
                           <button
                             onClick={() => handleOpenEdit(lease)}
                             className="p-1.5 rounded-lg text-[var(--text-secondary)] hover:text-[var(--accent)] hover:bg-[var(--bg-surface-sunken)] transition-colors cursor-pointer"
@@ -877,6 +946,14 @@ export const LeasesView: React.FC = () => {
           );
         })()}
       </Modal>
+      {/* Move-In / Move-Out Inspection Checklist Modal */}
+      <LeaseChecklistModal
+        isOpen={!!checklistLease}
+        onClose={() => setChecklistLease(null)}
+        lease={checklistLease}
+        tenant={tenants.find((t) => t.id === checklistLease?.tenant_id)}
+        unit={units.find((u) => u.id === checklistLease?.unit_id)}
+      />
     </div>
   );
 };

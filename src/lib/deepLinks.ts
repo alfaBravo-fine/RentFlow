@@ -58,6 +58,45 @@ export function buildWhatsAppLink(phone: string, text: string): string {
   return `https://wa.me/${clean}?text=${encodeURIComponent(text)}`;
 }
 
+export function openWhatsAppMessage(phone: string, text: string) {
+  const clean = cleanPhoneNumber(phone);
+  const nativeUrl = `whatsapp://send?phone=${clean}&text=${encodeURIComponent(text)}`;
+  const webUrl = `https://wa.me/${clean}?text=${encodeURIComponent(text)}`;
+
+  if (typeof window === 'undefined') return;
+
+  const isOnline = navigator.onLine;
+  if (!isOnline) {
+    openExternalUrl(webUrl);
+    return;
+  }
+
+  try {
+    const iframe = document.createElement('iframe');
+    iframe.style.display = 'none';
+    iframe.src = nativeUrl;
+    document.body.appendChild(iframe);
+
+    const timeout = setTimeout(() => {
+      if (iframe.parentNode) {
+        document.body.removeChild(iframe);
+      }
+      openExternalUrl(webUrl);
+    }, 1000);
+
+    const handleBlur = () => {
+      clearTimeout(timeout);
+      window.removeEventListener('blur', handleBlur);
+      if (iframe.parentNode) {
+        document.body.removeChild(iframe);
+      }
+    };
+    window.addEventListener('blur', handleBlur);
+  } catch {
+    openExternalUrl(webUrl);
+  }
+}
+
 export function buildSmsLink(phone: string, text: string): string {
   const clean = cleanPhoneNumber(phone);
   return `sms:${clean}?body=${encodeURIComponent(text)}`;
@@ -68,6 +107,23 @@ export function buildEmailLink(email: string, subject: string, body: string): st
 }
 
 /**
+ * Opens an external URL or protocol handler cleanly inside iframes without popup-blocker errors.
+ */
+export function openExternalUrl(url: string) {
+  if (!url || typeof document === 'undefined') return;
+  const link = document.createElement('a');
+  link.href = url;
+  if (!url.startsWith('mailto:') && !url.startsWith('tel:') && !url.startsWith('sms:')) {
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+  }
+  link.style.display = 'none';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
+
+/**
  * Attempts to launch deep link or falls back to web URL
  */
 export function openDeepLink(
@@ -75,7 +131,6 @@ export function openDeepLink(
   webFallbackUrl: string,
   onCopiedFallback?: (link: string) => void
 ) {
-  // Try opening protocol
   const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
   if (!isOnline && onCopiedFallback) {
     onCopiedFallback(webFallbackUrl);
@@ -83,11 +138,10 @@ export function openDeepLink(
   }
 
   try {
-    const w = window.open(protocolUrl, '_blank');
-    if (!w) {
-      window.open(webFallbackUrl, '_blank');
+    openExternalUrl(webFallbackUrl || protocolUrl);
+  } catch {
+    if (onCopiedFallback) {
+      onCopiedFallback(webFallbackUrl);
     }
-  } catch (e) {
-    window.open(webFallbackUrl, '_blank');
   }
 }

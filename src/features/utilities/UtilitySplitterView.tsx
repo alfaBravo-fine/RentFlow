@@ -5,6 +5,7 @@ import { usePack } from '../../countries/usePack';
 import { formatMoney } from '../../lib/money';
 import { generateUUID } from '../../lib/uuid';
 import { useToast } from '../../components/toast/ToastContext';
+import { buildWhatsAppLink, openExternalUrl } from '../../lib/deepLinks';
 import { Card, CardHeader, CardTitle } from '../../components/ui/Card';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
@@ -35,8 +36,13 @@ export const UtilitySplitterView: React.FC = () => {
   const [splitMethod, setSplitMethod] = useState<'by_sqft' | 'equal_headcount'>('by_sqft');
   const [hasCalculated, setHasCalculated] = useState(false);
 
-  const propUnits = units.filter((u) => u.property_id === selectedPropId && u.status === 'occupied');
-  const totalSqft = propUnits.reduce((acc, u) => acc + u.size, 0);
+  const propUnits = units.filter((u) => u.property_id === selectedPropId);
+  const occupiedUnits = propUnits.filter((u) => {
+    const l = leases.find((lease) => lease.unit_id === u.id && lease.status === 'active');
+    return u.status === 'occupied' || !!l;
+  });
+
+  const totalSqft = occupiedUnits.reduce((acc, u) => acc + u.size, 0);
   const totalBillMinor = Math.round((parseFloat(totalBillAmount) || 0) * 100);
 
   // Compute Per-Unit Split
@@ -45,18 +51,23 @@ export const UtilitySplitterView: React.FC = () => {
     const tenant = tenants.find((t) => t.id === lease?.tenant_id);
 
     let splitShareMinor = 0;
-    if (splitMethod === 'by_sqft' && totalSqft > 0) {
-      splitShareMinor = Math.round((totalBillMinor * u.size) / totalSqft);
-    } else if (propUnits.length > 0) {
-      splitShareMinor = Math.round(totalBillMinor / propUnits.length);
+    const isOccupied = u.status === 'occupied' || !!lease;
+
+    if (isOccupied) {
+      if (splitMethod === 'by_sqft' && totalSqft > 0) {
+        splitShareMinor = Math.round((totalBillMinor * u.size) / totalSqft);
+      } else if (occupiedUnits.length > 0) {
+        splitShareMinor = Math.round(totalBillMinor / occupiedUnits.length);
+      }
     }
 
     return {
       unit: u,
       tenant,
       lease,
+      isOccupied,
       shareMinor: splitShareMinor,
-      percentage: totalBillMinor > 0 ? Math.round((splitShareMinor / totalBillMinor) * 100) : 0,
+      percentage: totalBillMinor > 0 && isOccupied ? Math.round((splitShareMinor / totalBillMinor) * 100) : 0,
     };
   });
 
@@ -65,18 +76,22 @@ export const UtilitySplitterView: React.FC = () => {
       showToast({ type: 'error', message: 'Enter a valid utility bill amount!' });
       return;
     }
+
+    if (propUnits.length === 0) {
+      showToast({ type: 'error', message: 'No units found for this property.' });
+      return;
+    }
+
     setHasCalculated(true);
     showToast({
-      type: 'success',
-      message: `Split calculated across ${propUnits.length} occupied units using ${
-        splitMethod === 'by_sqft' ? 'Area Proportional' : 'Equal Split'
-      }`,
+      type: 'info',
+      message: `Utility split calculated across ${occupiedUnits.length} occupied unit(s).`,
     });
   };
 
-  const handleApplyAsInvoiceLineItems = () => {
-    if (!hasCalculated || unitSplits.length === 0) {
-      showToast({ type: 'error', message: 'Please calculate the split before applying to invoices.' });
+  const applySplitToInvoices = () => {
+    if (totalBillMinor <= 0) {
+      showToast({ type: 'error', message: 'Enter a valid utility bill amount!' });
       return;
     }
 
@@ -84,16 +99,28 @@ export const UtilitySplitterView: React.FC = () => {
     const openInvoices = db.getTable<Invoice>('invoices').filter((i) => !i.deleted_at);
 
     for (const item of unitSplits) {
-      if (!item.lease || item.shareMinor <= 0) continue;
+      // Handle Vacant Units
+      if (!item.isOccupied || !item.lease) {
+        showToast({
+          type: 'error',
+          message: `Cannot apply to ${item.unit.name} because it is currently vacant.`,
+        });
+        continue;
+      }
 
+      if (item.shareMinor <= 0) continue;
+
+      // Find unpaid invoice for current lease / month
       const existingOpenInv = openInvoices.find(
         (inv) => inv.lease_id === item.lease!.id && inv.status !== 'paid' && inv.status !== 'voided'
       );
 
       if (existingOpenInv) {
+        const newSubtotal = existingOpenInv.subtotal_minor + item.shareMinor;
+        const newTotal = existingOpenInv.total_minor + item.shareMinor;
         db.updateItem<Invoice>('invoices', existingOpenInv.id, {
-          subtotal_minor: existingOpenInv.subtotal_minor + item.shareMinor,
-          total_minor: existingOpenInv.total_minor + item.shareMinor,
+          subtotal_minor: newSubtotal,
+          total_minor: newTotal,
         });
         db.recordAudit(
           'UTILITY_CHARGE_ADDED',
@@ -104,7 +131,7 @@ export const UtilitySplitterView: React.FC = () => {
         );
         appliedCount++;
       } else {
-        // Create dedicated utility invoice
+        // Automatically create a new invoice for this month
         const invId = generateUUID();
         const nowIso = new Date().toISOString().slice(0, 10);
         const dueIso = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -127,37 +154,42 @@ export const UtilitySplitterView: React.FC = () => {
     }
 
     // Save record to utility_bills
-    db.insertItem<UtilityBill>('utility_bills', {
-      id: generateUUID(),
-      property_id: selectedPropId,
-      utility_type: utilityType,
-      bill_period: new Date().toISOString().slice(0, 7),
-      total_amount_minor: totalBillMinor,
-      split_method: splitMethod,
-      splits_json: JSON.stringify(
-        unitSplits.map((s) => ({
-          unit_id: s.unit.id,
-          tenant_name: s.tenant?.name || 'Resident',
-          amount_minor: s.shareMinor,
-        }))
-      ),
-      created_at: Date.now(),
-    });
+    if (appliedCount > 0) {
+      db.insertItem<UtilityBill>('utility_bills', {
+        id: generateUUID(),
+        property_id: selectedPropId,
+        utility_type: utilityType,
+        bill_period: new Date().toISOString().slice(0, 7),
+        total_amount_minor: totalBillMinor,
+        split_method: splitMethod,
+        splits_json: JSON.stringify(
+          unitSplits
+            .filter((s) => s.isOccupied)
+            .map((s) => ({
+              unit_id: s.unit.id,
+              tenant_name: s.tenant?.name || 'Resident',
+              amount_minor: s.shareMinor,
+            }))
+        ),
+        created_at: Date.now(),
+      });
 
-    showToast({
-      type: 'success',
-      message: `Successfully injected ${utilityType} line items into ${appliedCount} tenant invoices!`,
-    });
+      showToast({
+        type: 'success',
+        message: `Utility bills added to ${appliedCount} invoice(s) successfully!`,
+      });
+    }
+  };
+
+  const handleApplyAsInvoiceLineItems = () => {
+    applySplitToInvoices();
   };
 
   const handleSendBillWhatsApp = (tenant: Tenant | undefined, amountMinor: number, unitName: string) => {
     if (!tenant) return;
     const formatted = formatMoney(amountMinor, pack);
-    const msg = encodeURIComponent(
-      `Hello ${tenant.name}, your share for the ${utilityType.toUpperCase()} utility bill for ${unitName} is ${formatted}. Please remit alongside your monthly rent.`
-    );
-    const cleanPhone = tenant.phone.replace(/[^0-9]/g, '');
-    window.open(`https://wa.me/${cleanPhone}?text=${msg}`, '_blank');
+    const msg = `Hello ${tenant.name}, your share for the ${utilityType.toUpperCase()} utility bill for ${unitName} is ${formatted}. Please remit alongside your monthly rent.`;
+    openExternalUrl(buildWhatsAppLink(tenant.phone, msg));
   };
 
   const selectedProp = properties.find((p) => p.id === selectedPropId);

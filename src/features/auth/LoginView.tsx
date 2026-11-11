@@ -3,10 +3,12 @@ import { useAuthStore } from '../../stores/authStore';
 import { Card } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
 import { Badge } from '../../components/ui/Badge';
-import { ShieldCheck, Lock, RefreshCw, AlertCircle, Database, Folder } from '../../components/icons';
+import { ShieldCheck, Lock, RefreshCw, AlertCircle, Database, Folder, UserCheck } from '../../components/icons';
 import { RentFlowLogo } from '../../components/brand/RentFlowLogo';
 import { GOOGLE_CLIENT_ID } from '../../config/google';
-import { isTauri, tauriGoogleOAuth, tauriDrivePullBackup } from '../../lib/tauri/bridge';
+import { isTauri as detectTauri } from '../../lib/tauri/bridge';
+
+const isTauri = detectTauri();
 
 export const LoginView: React.FC = () => {
   const setAuthenticating = useAuthStore((s) => s.setAuthenticating);
@@ -16,45 +18,90 @@ export const LoginView: React.FC = () => {
 
   const [statusText, setStatusText] = useState<string | null>(null);
 
-  const handleSignIn = async () => {
-    try {
-      setAuthenticating(true, null);
-      setStatusText('Starting Desktop loopback server & opening browser...');
+  // Desktop Native Loopback OAuth Trigger via Rust (tauri-plugin-oauth + oauth2)
+  const handleGoogleLogin = async () => {
+    if (isTauri) {
+      try {
+        setAuthenticating(true, null);
+        setStatusText('Starting 127.0.0.1 desktop loopback server & opening default browser...');
 
-      let profile;
-      if (isTauri()) {
-        profile = await tauriGoogleOAuth();
-      } else {
         const { invoke } = await import('@tauri-apps/api/core');
-        profile = await invoke<any>('google_login');
+        // Rust starts 127.0.0.1 loopback, opens browser, catches code, exchanges token, stores in Rust AuthState
+        const profile = await invoke<{
+          id: string;
+          email: string;
+          name: string;
+          picture?: string;
+        }>('google_login');
+
+        setStatusText('Authenticated! Checking Google Drive appDataFolder for cloud backup...');
+
+        // Rust pulls and decrypts RentFlow_FullBackup.enc into native SQLCipher SQLite
+        try {
+          const restoreResult = await invoke<{ restored: boolean; message: string }>('drive_pull_backup', {
+            googleId: profile.id,
+          });
+          if (restoreResult.restored) {
+            console.log('[RentFlow Desktop] Cloud database restored:', restoreResult.message);
+          }
+        } catch (e) {
+          console.warn('[Desktop Backup Pull] Ignored backup check error:', e);
+        }
+
+        // Token security: raw access_token & refresh_token remain locked in Rust memory / Stronghold vault
+        setGoogleSession(
+          {
+            sub: profile.id,
+            email: profile.email,
+            name: profile.name,
+            picture: profile.picture,
+          },
+          'tauri_desktop_token_secured_in_rust',
+          ''
+        );
+      } catch (err: unknown) {
+        console.error('[Desktop Sign-in Error]:', err);
+        const msg =
+          typeof err === 'string'
+            ? err
+            : (err as { message?: string })?.message || 'Desktop OAuth loopback failed.';
+        setAuthenticating(false, msg);
+      } finally {
+        setStatusText(null);
       }
-
-      setStatusText('Signed in successfully! Checking encrypted cloud backup...');
-
-      // Pull & restore cloud backup in Rust backend
-      const pullResult = await tauriDrivePullBackup(profile.id).catch(() => ({ restored: false }));
-
-      setGoogleSession(
-        {
-          sub: profile.id,
-          email: profile.email,
-          name: profile.name,
-          picture: profile.picture,
-        },
-        'tauri_desktop_token_secured_in_rust',
-        ''
-      );
-
-      if (pullResult.restored) {
-        setStatusText('Restored cloud backup into SQLCipher database! Opening dashboard...');
-        setTimeout(() => window.location.reload(), 600);
-      }
-    } catch (err: any) {
-      console.error('[Desktop Sign-in] Error:', err);
-      setAuthenticating(false, err.message || 'Desktop OAuth failed.');
-    } finally {
-      setStatusText(null);
+    } else {
+      // Browser preview environment: authenticate with simulated local session
+      setAuthenticating(true, null);
+      setStatusText('Logging in with Google identity in preview mode...');
+      setTimeout(() => {
+        setGoogleSession(
+          {
+            sub: 'google_user_demo_101',
+            email: 'admin@rentflow.app',
+            name: 'Portfolio Owner',
+            picture: undefined,
+          },
+          'web_preview_session_token',
+          ''
+        );
+        setAuthenticating(false, null);
+        setStatusText(null);
+      }, 500);
     }
+  };
+
+  // Instant Test / Demo Session
+  const handleTestDemoLogin = () => {
+    setGoogleSession(
+      {
+        sub: 'demo_user_101',
+        email: 'alex.morgan@horizonproperty.com',
+        name: 'Alex Morgan (Demo Admin)',
+        picture: undefined,
+      },
+      'demo_access_token_web_session',
+      ''
+    );
   };
 
   return (
@@ -66,10 +113,10 @@ export const LoginView: React.FC = () => {
             <RentFlowLogo size={36} className="text-white" />
           </div>
           <h1 className="text-2xl font-bold tracking-tight text-[var(--text-primary)]">
-            RentFlow Property Manager
+            RentFlow Desktop
           </h1>
           <p className="text-xs text-[var(--text-secondary)] mt-1 max-w-xs">
-            Offline-First Rental Ledger &bull; Zero-Knowledge Google Drive Redundancy
+            Native Desktop Property Management &bull; Zero-Knowledge SQLite Encryption
           </p>
         </div>
 
@@ -77,11 +124,11 @@ export const LoginView: React.FC = () => {
         <Card className="p-6 sm:p-8 space-y-6 text-left border border-[var(--border-strong)] rounded-2xl shadow-lg bg-[var(--bg-surface)]">
           <div className="flex items-center justify-between pb-3 border-b border-[var(--border-subtle)]">
             <span className="text-xs font-bold text-[var(--text-primary)] uppercase tracking-wider">
-              Google Account Sign In
+              Native Desktop Authentication
             </span>
             <Badge variant="success" className="gap-1">
               <ShieldCheck className="w-3 h-3 text-emerald-600" />
-              <span>AES-256-GCM Private</span>
+              <span>Rust Loopback + Stronghold</span>
             </Badge>
           </div>
 
@@ -91,9 +138,9 @@ export const LoginView: React.FC = () => {
                 <Folder className="w-3.5 h-3.5" />
               </div>
               <div>
-                <strong className="text-[var(--text-primary)]">Private Hidden App Data:</strong>
+                <strong className="text-[var(--text-primary)]">Native Loopback Flow (127.0.0.1):</strong>
                 <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
-                  Creates <code className="font-mono text-[10px] bg-[var(--bg-base)] px-1 py-0.5 rounded">RentFlowBackup.enc</code> inside Google Drive's hidden <code className="font-mono text-[10px] bg-[var(--bg-base)] px-1 py-0.5 rounded">appDataFolder</code>.
+                  Opens your system default browser with PKCE verification and captures the callback on a local loopback server.
                 </p>
               </div>
             </div>
@@ -103,9 +150,9 @@ export const LoginView: React.FC = () => {
                 <Lock className="w-3.5 h-3.5" />
               </div>
               <div>
-                <strong className="text-[var(--text-primary)]">Zero-Knowledge Encryption:</strong>
+                <strong className="text-[var(--text-primary)]">Token Security at Rest:</strong>
                 <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
-                  All databases are client-encrypted using AES-256-GCM with a secret key derived from your real Google ID before leaving your device.
+                  Access and refresh tokens are securely retained in the Rust native backend. Raw credentials are never transmitted to the frontend.
                 </p>
               </div>
             </div>
@@ -115,9 +162,9 @@ export const LoginView: React.FC = () => {
                 <Database className="w-3.5 h-3.5" />
               </div>
               <div>
-                <strong className="text-[var(--text-primary)]">Automated Sync:</strong>
+                <strong className="text-[var(--text-primary)]">Encrypted SQLite & Cloud Sync:</strong>
                 <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
-                  Changes sync silently in the background 5 seconds after any local database update.
+                  Native SQLCipher database automatically pushes and pulls AES-256 encrypted backups to Google Drive <code className="font-mono text-[10px] bg-[var(--bg-base)] px-1 py-0.5 rounded">appDataFolder</code>.
                 </p>
               </div>
             </div>
@@ -141,12 +188,12 @@ export const LoginView: React.FC = () => {
           )}
 
           {/* Prominent Google Sign-in Button */}
-          <div className="pt-2">
+          <div className="pt-2 space-y-3">
             <Button
               type="button"
               variant="primary"
               className="w-full py-3 h-12 gap-3 font-semibold text-sm rounded-xl cursor-pointer shadow-md transition-all active:scale-[0.99]"
-              onClick={handleSignIn}
+              onClick={handleGoogleLogin}
               disabled={isAuthenticating}
             >
               <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
@@ -167,16 +214,29 @@ export const LoginView: React.FC = () => {
                   d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
                 />
               </svg>
-              <span>{isAuthenticating ? 'Connecting to Google...' : 'Sign in with Google'}</span>
+              <span>{isAuthenticating ? 'Connecting to Google...' : (isTauri ? 'Sign in with Google (Desktop Loopback)' : 'Sign in with Google')}</span>
             </Button>
-            <p className="text-[10px] font-mono text-[var(--text-secondary)] mt-3 text-center break-all bg-[var(--bg-base)] p-1.5 rounded border border-[var(--border-subtle)] select-all">
-              Debugging ID: {GOOGLE_CLIENT_ID}
+
+            {!isTauri && (
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full py-2.5 h-10 gap-2 text-xs font-semibold rounded-xl text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--accent)] border-dashed transition-all"
+                onClick={handleTestDemoLogin}
+              >
+                <UserCheck className="w-3.5 h-3.5 text-indigo-500" />
+                <span>Continue as Test Portfolio Manager</span>
+              </Button>
+            )}
+
+            <p className="text-[10px] font-mono text-[var(--text-secondary)] mt-2 text-center break-all bg-[var(--bg-base)] p-1.5 rounded border border-[var(--border-subtle)] select-all">
+              Environment: {isTauri ? 'Desktop (Tauri v2 Native)' : 'Web Browser Preview'} &bull; Client ID: {GOOGLE_CLIENT_ID.slice(0, 16)}…
             </p>
           </div>
         </Card>
 
         <p className="text-[11px] text-[var(--text-secondary)]">
-          RentFlow Property Manager &bull; Google OAuth 2.0 Protected
+          RentFlow Property Manager &bull; Tauri v2 Desktop Engine
         </p>
       </div>
     </div>

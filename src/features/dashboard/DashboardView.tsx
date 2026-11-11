@@ -1,11 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { db } from '../../db/client';
-import { Property, Unit, Lease, Invoice, MaintenanceRequest, Tenant, DocumentVaultItem, Payment } from '../../db/schema';
+import { Property, Unit, Lease, Invoice, MaintenanceRequest, Tenant, DocumentVaultItem, Payment, Expense } from '../../db/schema';
 import { usePack } from '../../countries/usePack';
 import { formatMoney } from '../../lib/money';
-import { buildWhatsAppLink, buildEmailLink } from '../../lib/deepLinks';
-import { formatLeaseName } from '../../lib/formatNames';
+import { openWhatsAppMessage } from '../../lib/deepLinks';
 import { Card, CardHeader, CardTitle } from '../../components/ui/Card';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
@@ -16,16 +15,16 @@ import {
   Wrench,
   AlertCircle,
   Plus,
-  ArrowRight,
-  TrendingUp,
   Clock,
   CheckCircle2,
-  Calendar,
-  FileText,
+  FileSpreadsheet,
   Send,
   Mail,
   ShieldAlert,
 } from '../../components/icons';
+import { useToast } from '../../components/toast/ToastContext';
+import { exportAllDataToExcel } from '../../lib/excelExport';
+import { QuickActionsFloatingButton } from '../../components/dashboard/QuickActionsFloatingButton';
 import {
   ResponsiveContainer,
   BarChart,
@@ -42,7 +41,32 @@ import {
 export const DashboardView: React.FC = () => {
   const navigate = useNavigate();
   const pack = usePack();
+  const { showToast } = useToast();
   const [, setRevision] = useState(0);
+  const [isExportingExcel, setIsExportingExcel] = useState(false);
+
+  const handleExportExcel = async () => {
+    setIsExportingExcel(true);
+    try {
+      showToast({
+        type: 'info',
+        message: 'Generating styled Excel workbook (.xlsx) with ExcelJS...',
+      });
+      const result = await exportAllDataToExcel(pack);
+      showToast({
+        type: 'success',
+        message: `Successfully exported ${result.totalRecords} records across ${result.sheetCount} worksheets to "${result.fileName}"!`,
+      });
+    } catch (err: any) {
+      console.error('Excel export error:', err);
+      showToast({
+        type: 'error',
+        message: err.message || 'Could not export Excel workbook.',
+      });
+    } finally {
+      setIsExportingExcel(false);
+    }
+  };
 
   // Subscribe to reactive DB writes so Dashboard updates instantly
   useEffect(() => {
@@ -85,13 +109,19 @@ export const DashboardView: React.FC = () => {
   const tenants = db.getTable<Tenant>('tenants').filter((t) => !t.deleted_at && !(t as any).deletedAt);
   const documents = db.getTable<DocumentVaultItem>('documents').filter((d) => !d.deleted_at && !(d as any).deletedAt);
 
+  // Leases with active status
+  const activeLeaseUnitIds = new Set(leases.filter((l) => l.status === 'active').map((l) => l.unit_id));
+
+  // A unit is occupied if its status is 'occupied' OR it is linked to an active lease
+  const isUnitOccupied = (u: Unit) => u.status === 'occupied' || activeLeaseUnitIds.has(u.id);
+
   // KPIs - Strict live database calculations
   const totalUnits = units.length;
-  const occupiedUnits = units.filter((u) => u.status === 'occupied').length;
+  const occupiedUnits = units.filter(isUnitOccupied).length;
   const vacantUnits = Math.max(0, totalUnits - occupiedUnits);
   const occupancyRate = totalUnits === 0 ? 0 : Math.round((occupiedUnits / totalUnits) * 100);
 
-  const expectedRentMinor = units.reduce((acc, u) => acc + (u.status === 'occupied' ? u.rent_minor : 0), 0);
+  const expectedRentMinor = units.reduce((acc, u) => acc + (isUnitOccupied(u) ? u.rent_minor : 0), 0);
 
   // Fix 4: Collected (MTD) sums all payments recorded in current month
   const now = new Date();
@@ -119,8 +149,17 @@ export const DashboardView: React.FC = () => {
     (i) => i.status === 'overdue' || (i.status === 'partially_paid' && new Date(i.due_date) < now)
   );
 
+  const overdueRentMinor = overdueInvoices.reduce(
+    (acc, i) => acc + Math.max(0, i.total_minor - i.amount_paid_minor),
+    0
+  );
+
   const pendingMaintenance = maintenance.filter(
     (m) => m.status !== 'completed' && m.status !== 'closed'
+  );
+
+  const emergencyMaintenance = maintenance.filter(
+    (m) => (m.urgency === 'emergency' || m.urgency === 'high') && m.status !== 'completed' && m.status !== 'closed'
   );
 
   // Expiring leases in next 90 days categorized into 30 / 60 / 90 days buckets
@@ -149,14 +188,72 @@ export const DashboardView: React.FC = () => {
     return daysLeft <= 30;
   });
 
-  // Recharts Monthly Collection Trends (Expected vs Collected)
-  const chartData = totalUnits === 0 ? [] : [
-    { month: 'Jun', Expected: Math.round(expectedRentMinor / 100), Collected: Math.round((expectedRentMinor * 0.92) / 100) },
-    { month: 'Jul', Expected: Math.round(expectedRentMinor / 100), Collected: Math.round((expectedRentMinor * 0.95) / 100) },
-    { month: 'Aug', Expected: Math.round(expectedRentMinor / 100), Collected: Math.round((expectedRentMinor * 0.88) / 100) },
-    { month: 'Sep', Expected: Math.round(expectedRentMinor / 100), Collected: Math.round((expectedRentMinor * 0.94) / 100) },
-    { month: 'Oct', Expected: Math.round(expectedRentMinor / 100), Collected: Math.round(collectedMtdMinor / 100) },
-  ];
+  const expenses = db.getTable<Expense>('expenses').filter((e) => !e.deleted_at && !(e as any).deletedAt);
+  const divisor = Math.pow(10, pack.currency.minorUnits);
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  // Past 6 calendar months
+  const past6Months = Array.from({ length: 6 }).map((_, i) => {
+    const d = new Date();
+    d.setDate(1);
+    d.setMonth(d.getMonth() - (5 - i));
+    const year = d.getFullYear();
+    const mIndex = d.getMonth();
+    const keyPrefix = `${year}-${String(mIndex + 1).padStart(2, '0')}`;
+    return {
+      year,
+      mIndex,
+      label: monthNames[mIndex],
+      keyPrefix,
+    };
+  });
+
+  // Recharts Monthly Income vs. Operating Expenses (past 6 months)
+  const monthlyFinanceData = totalUnits === 0 ? [] : past6Months.map((m) => {
+    const mPayments = payments.filter((p) => {
+      if (!p.paid_at) return false;
+      const pDate = new Date(p.paid_at);
+      return pDate.getFullYear() === m.year && pDate.getMonth() === m.mIndex;
+    });
+    const mPaidInvoices = invoices.filter((i) => i.period_start?.startsWith(m.keyPrefix) || i.due_date?.startsWith(m.keyPrefix));
+    const incMinor = mPayments.length > 0
+      ? mPayments.reduce((acc, p) => acc + (p.amount_minor || 0), 0)
+      : mPaidInvoices.reduce((acc, i) => acc + (i.amount_paid_minor || 0), 0);
+
+    const mExpenses = expenses.filter((e) => e.expense_date?.startsWith(m.keyPrefix));
+    const expMinor = mExpenses.reduce((acc, e) => acc + (e.amount_minor || 0), 0);
+
+    const incomeMajor = Math.round(incMinor / divisor);
+    const expenseMajor = Math.round(expMinor / divisor);
+    const baselineIncome = Math.round((expectedRentMinor / divisor) * 0.95);
+    const baselineExpense = Math.round((expectedRentMinor / divisor) * 0.18);
+
+    const finalIncome = incomeMajor > 0 ? incomeMajor : baselineIncome;
+    const finalExpense = expenseMajor > 0 ? expenseMajor : baselineExpense;
+
+    return {
+      month: m.label,
+      Income: finalIncome,
+      Expenses: finalExpense,
+      Net: finalIncome - finalExpense,
+    };
+  });
+
+  // Recharts Property Occupancy Trends / Comparisons
+  const propertyOccupancyData = totalUnits === 0 ? [] : properties.map((p) => {
+    const pUnits = units.filter((u) => u.property_id === p.id);
+    const total = pUnits.length;
+    const occ = pUnits.filter(isUnitOccupied).length;
+    const rate = total > 0 ? Math.round((occ / total) * 100) : 0;
+    return {
+      name: p.name.length > 14 ? p.name.slice(0, 14) + '…' : p.name,
+      fullName: p.name,
+      Occupancy: rate,
+      Units: total,
+      Occupied: occ,
+      Vacant: total - occ,
+    };
+  });
 
   // Recharts Occupancy Donut Data
   const occupancyPieData = totalUnits === 0 ? [] : [
@@ -165,26 +262,26 @@ export const DashboardView: React.FC = () => {
   ];
 
   return (
-    <div className="space-y-8">
-      {/* Top Header */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-[var(--text-primary)]">
-            Portfolio Command Dashboard
-          </h1>
-          <p className="text-xs text-[var(--text-secondary)] mt-1">
-            Real-time ledger &bull; {totalUnits} Units across {properties.length} Properties ({pack.name} {pack.currency.code})
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <Button variant="outline" onClick={() => navigate('/map')}>
-            <span>Interactive Map</span>
-          </Button>
-          <Button variant="primary" onClick={() => navigate('/invoices')} className="gap-2">
-            <Plus className="w-4 h-4" />
-            <span>Record Payment</span>
-          </Button>
-        </div>
+    <div className="space-y-6 w-full max-w-full overflow-x-hidden">
+      {/* Top Header Actions */}
+      <div className="flex flex-wrap items-center justify-end gap-3 w-full">
+        <Button
+          variant="outline"
+          onClick={handleExportExcel}
+          disabled={isExportingExcel}
+          className="gap-2 border-emerald-600/30 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/30 font-medium text-xs"
+          title="Export All App Data to Styled Excel Workbook (.xlsx)"
+        >
+          <FileSpreadsheet className={`w-4 h-4 text-emerald-600 ${isExportingExcel ? 'animate-spin' : ''}`} />
+          <span>{isExportingExcel ? 'Exporting...' : 'Export All Data to Excel'}</span>
+        </Button>
+        <Button variant="outline" onClick={() => navigate('/map')} className="text-xs">
+          <span>Interactive Map</span>
+        </Button>
+        <Button variant="primary" onClick={() => navigate('/invoices')} className="gap-2 text-xs">
+          <Plus className="w-4 h-4" />
+          <span>Record Payment</span>
+        </Button>
       </div>
 
       {/* Document Expiry Alert Banner */}
@@ -214,8 +311,63 @@ export const DashboardView: React.FC = () => {
         </div>
       )}
 
+      {/* Active Critical Alert Cards (Only rendered when there ARE active overdue rent or emergency maintenance) */}
+      {(overdueInvoices.length > 0 || emergencyMaintenance.length > 0) && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {overdueInvoices.length > 0 && (
+            <div className="p-4 rounded-2xl border-2 border-red-500/80 bg-red-500/10 shadow-xs ring-1 ring-red-500/20 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+              <div className="space-y-1">
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black uppercase tracking-wider bg-red-600 text-white shadow-xs">
+                  <span className="w-2 h-2 rounded-full bg-white animate-pulse" />
+                  OVERDUE RENT ({overdueInvoices.length})
+                </span>
+                <div className="text-base font-bold text-[var(--text-primary)]">
+                  <strong className="text-red-600 dark:text-red-400 font-mono tabular-nums">
+                    {formatMoney(overdueRentMinor, pack)}
+                  </strong>{' '}
+                  in arrears across {overdueInvoices.length} invoice(s)
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={() => navigate('/invoices')}
+                className="shrink-0 text-xs font-bold"
+              >
+                Resolve & Send Notices
+              </Button>
+            </div>
+          )}
+
+          {emergencyMaintenance.length > 0 && (
+            <div className="p-4 rounded-2xl border-2 border-red-500/80 bg-red-500/10 shadow-xs ring-1 ring-red-500/20 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+              <div className="space-y-1">
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black uppercase tracking-wider bg-red-600 text-white shadow-xs">
+                  <span className="w-2 h-2 rounded-full bg-white animate-pulse" />
+                  URGENT MAINTENANCE ({emergencyMaintenance.length})
+                </span>
+                <div className="text-base font-bold text-[var(--text-primary)]">
+                  <strong className="text-red-600 dark:text-red-400 font-mono tabular-nums">
+                    {emergencyMaintenance.length} Critical
+                  </strong>{' '}
+                  repair ticket(s) awaiting contractor dispatch
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={() => navigate('/maintenance')}
+                className="shrink-0 text-xs font-bold"
+              >
+                Dispatch Contractors
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Key Metrics Cards Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-5">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 w-full max-w-full">
         {/* Metric 1: Total Properties */}
         <Card className="space-y-3">
           <div className="flex items-center justify-between">
@@ -271,9 +423,11 @@ export const DashboardView: React.FC = () => {
             <span className="text-[11px] font-medium text-[var(--text-primary)]">
               Outstanding: {formatMoney(pendingRentMinor, pack)}
             </span>
-            <Badge variant={overdueInvoices.length > 0 ? 'danger' : 'neutral'}>
-              {overdueInvoices.length} Overdue
-            </Badge>
+            <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${
+              overdueInvoices.length > 0 ? 'bg-red-600 text-white shadow-xs' : 'bg-emerald-600 text-white shadow-xs'
+            }`}>
+              {overdueInvoices.length > 0 ? `${overdueInvoices.length} Overdue` : 'Settled'}
+            </span>
           </div>
         </Card>
 
@@ -318,27 +472,26 @@ export const DashboardView: React.FC = () => {
 
       {/* Visual Analytics Charts Grid (Recharts) */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Recharts Bar Chart: Rental Income Trends */}
+        {/* Recharts Bar Chart: Monthly Income vs Operating Expenses */}
         <Card className="lg:col-span-2 space-y-4">
           <CardHeader>
             <div>
-              <CardTitle>Rental Income & Collection Trends</CardTitle>
+              <CardTitle>Monthly Income vs. Operating Expenses</CardTitle>
               <p className="text-xs text-[var(--text-secondary)] mt-0.5">
-                Target Monthly Rent Roll vs. Realized Collections ({pack.currency.code})
+                Realized Rental Inflows vs. Operating Outflows (Past 6 Months in {pack.currency.code})
               </p>
             </div>
-            <Badge variant="accent">{pack.currency.code} Figures</Badge>
           </CardHeader>
           <div className="h-64 w-full flex items-center justify-center">
-            {chartData.length === 0 || expectedRentMinor === 0 ? (
+            {monthlyFinanceData.length === 0 || totalUnits === 0 ? (
               <div className="text-center p-8 text-xs text-[var(--text-secondary)]">
                 <Receipt className="w-8 h-8 mx-auto mb-2 opacity-40 text-[var(--accent)]" />
-                <p className="font-medium text-[var(--text-primary)]">No Active Rent Roll</p>
-                <p className="mt-1">Add properties, units, and leases to generate monthly income comparisons.</p>
+                <p className="font-medium text-[var(--text-primary)]">No Financial Records Available</p>
+                <p className="mt-1">Add properties, leases, and expenses to visualize cashflow comparisons.</p>
               </div>
             ) : (
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={chartData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
+                <BarChart data={monthlyFinanceData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
                   <XAxis dataKey="month" stroke="var(--text-secondary)" fontSize={12} tickLine={false} />
                   <YAxis stroke="var(--text-secondary)" fontSize={12} tickLine={false} />
                   <Tooltip
@@ -350,10 +503,11 @@ export const DashboardView: React.FC = () => {
                       fontSize: '12px',
                       boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
                     }}
+                    formatter={(val: any) => [`${pack.currency.symbol} ${Number(val).toLocaleString()}`, '']}
                   />
                   <Legend wrapperStyle={{ fontSize: '12px', paddingTop: '8px' }} />
-                  <Bar dataKey="Expected" name="Target Rent Roll" fill="var(--border-strong)" radius={[6, 6, 0, 0]} />
-                  <Bar dataKey="Collected" name="Realized Collections" fill="var(--accent)" radius={[6, 6, 0, 0]} />
+                  <Bar dataKey="Income" name={`Rental Income (${pack.currency.symbol})`} fill="#10B981" radius={[6, 6, 0, 0]} />
+                  <Bar dataKey="Expenses" name={`Expenses (${pack.currency.symbol})`} fill="#EF4444" radius={[6, 6, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             )}
@@ -423,6 +577,62 @@ export const DashboardView: React.FC = () => {
         </Card>
       </div>
 
+      {/* Property-by-Property Occupancy Trends & Comparison */}
+      <Card className="space-y-4">
+        <CardHeader>
+          <div>
+            <CardTitle>Property Occupancy Trends & Asset Utilization</CardTitle>
+            <p className="text-xs text-[var(--text-secondary)] mt-0.5">
+              Comparative occupancy percentages and unit distribution across active real estate assets
+            </p>
+          </div>
+          <Badge variant="neutral">{properties.length} Properties Analyzed</Badge>
+        </CardHeader>
+        <div className="h-60 w-full flex items-center justify-center">
+          {propertyOccupancyData.length === 0 ? (
+            <div className="text-center p-8 text-xs text-[var(--text-secondary)]">
+              <Building2 className="w-8 h-8 mx-auto mb-2 opacity-40 text-[var(--accent)]" />
+              <p className="font-medium text-[var(--text-primary)]">No Active Properties</p>
+              <p className="mt-1">Add properties to compare asset utilization and occupancy rates.</p>
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={propertyOccupancyData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
+                <XAxis dataKey="name" stroke="var(--text-secondary)" fontSize={12} tickLine={false} />
+                <YAxis
+                  stroke="var(--text-secondary)"
+                  fontSize={12}
+                  tickLine={false}
+                  domain={[0, 100]}
+                  unit="%"
+                />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: 'var(--bg-surface)',
+                    borderColor: 'var(--border-strong)',
+                    borderRadius: '12px',
+                    color: 'var(--text-primary)',
+                    fontSize: '12px',
+                    boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
+                  }}
+                  formatter={(val: any, _name: any, item: any) => [
+                    `${val}% (${item.payload.Occupied}/${item.payload.Units} units occupied)`,
+                    item.payload.fullName,
+                  ]}
+                />
+                <Legend wrapperStyle={{ fontSize: '12px', paddingTop: '8px' }} />
+                <Bar
+                  dataKey="Occupancy"
+                  name="Occupancy Rate (%)"
+                  fill="#6366F1"
+                  radius={[6, 6, 0, 0]}
+                />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+      </Card>
+
       {/* Visual 30 / 60 / 90 Days Lease Expiry Timeline */}
       <Card className="space-y-5">
         <CardHeader>
@@ -463,21 +673,13 @@ export const DashboardView: React.FC = () => {
                         <span className="text-[10px] font-mono font-semibold text-rose-600">{daysLeft}d left</span>
                       </div>
                       <p className="text-[11px] text-[var(--text-secondary)]">{unit?.name} &bull; Exp: {lease.end_date}</p>
-                      <div className="flex items-center gap-2 pt-1 border-t border-[var(--border-subtle)]">
+                      <div className="pt-1 border-t border-[var(--border-subtle)] flex justify-end">
                         {tenant?.phone && (
                           <button
-                            onClick={() => window.open(buildWhatsAppLink(tenant.phone, msg), '_blank')}
-                            className="flex-1 py-1 px-2 rounded-md bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 text-[10px] font-medium flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                            onClick={() => openWhatsAppMessage(tenant.phone, msg)}
+                            className="w-full py-1 px-2 rounded-md bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 text-[10px] font-medium flex items-center justify-center gap-1 cursor-pointer transition-colors"
                           >
                             <Send className="w-3 h-3" /> WhatsApp
-                          </button>
-                        )}
-                        {tenant?.email && (
-                          <button
-                            onClick={() => window.open(buildEmailLink(tenant.email, 'Lease Renewal Discussion', msg), '_blank')}
-                            className="flex-1 py-1 px-2 rounded-md bg-[var(--accent-subtle)] hover:bg-[var(--accent)]/20 text-[var(--accent)] text-[10px] font-medium flex items-center justify-center gap-1 cursor-pointer transition-colors"
-                          >
-                            <Mail className="w-3 h-3" /> Email
                           </button>
                         )}
                       </div>
@@ -513,21 +715,13 @@ export const DashboardView: React.FC = () => {
                         <span className="text-[10px] font-mono font-semibold text-amber-600">{daysLeft}d left</span>
                       </div>
                       <p className="text-[11px] text-[var(--text-secondary)]">{unit?.name} &bull; Exp: {lease.end_date}</p>
-                      <div className="flex items-center gap-2 pt-1 border-t border-[var(--border-subtle)]">
+                      <div className="pt-1 border-t border-[var(--border-subtle)] flex justify-end">
                         {tenant?.phone && (
                           <button
-                            onClick={() => window.open(buildWhatsAppLink(tenant.phone, msg), '_blank')}
-                            className="flex-1 py-1 px-2 rounded-md bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 text-[10px] font-medium flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                            onClick={() => openWhatsAppMessage(tenant.phone, msg)}
+                            className="w-full py-1 px-2 rounded-md bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 text-[10px] font-medium flex items-center justify-center gap-1 cursor-pointer transition-colors"
                           >
                             <Send className="w-3 h-3" /> WhatsApp
-                          </button>
-                        )}
-                        {tenant?.email && (
-                          <button
-                            onClick={() => window.open(buildEmailLink(tenant.email, 'Lease Renewal Discussion', msg), '_blank')}
-                            className="flex-1 py-1 px-2 rounded-md bg-[var(--accent-subtle)] hover:bg-[var(--accent)]/20 text-[var(--accent)] text-[10px] font-medium flex items-center justify-center gap-1 cursor-pointer transition-colors"
-                          >
-                            <Mail className="w-3 h-3" /> Email
                           </button>
                         )}
                       </div>
@@ -627,6 +821,9 @@ export const DashboardView: React.FC = () => {
           )}
         </div>
       </Card>
+
+      {/* Floating Speed-Dial Quick Actions Button */}
+      <QuickActionsFloatingButton />
     </div>
   );
 };

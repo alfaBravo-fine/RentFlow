@@ -18,11 +18,13 @@ import { DocumentsView } from './features/documents/DocumentsView';
 import { OwnersView } from './features/owners/OwnersView';
 import { SyncView } from './features/sync/SyncView';
 import { SettingsView } from './features/settings/SettingsView';
+import { CalendarView } from './features/calendar/CalendarView';
 
 export const AppRoutes: React.FC = () => {
   return (
     <Routes>
       <Route path="/" element={<DashboardView />} />
+      <Route path="/calendar" element={<CalendarView />} />
       <Route path="/onboarding" element={<OnboardingView />} />
       <Route path="/properties" element={<PropertiesView />} />
       <Route path="/map" element={<MapView />} />

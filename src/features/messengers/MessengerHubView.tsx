@@ -6,24 +6,16 @@ import { usePack } from '../../countries/usePack';
 import { formatMoney } from '../../lib/money';
 import {
   MESSAGE_TEMPLATES,
-  buildWhatsAppLink,
-  buildSmsLink,
-  buildEmailLink,
+  openWhatsAppMessage,
+  cleanPhoneNumber,
 } from '../../lib/deepLinks';
 import { useToast } from '../../components/toast/ToastContext';
 import { Card, CardHeader, CardTitle } from '../../components/ui/Card';
 import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
 import {
-  MessageSquare,
   Send,
-  Mail,
-  Phone,
   Copy,
-  ExternalLink,
-  CheckCircle,
-  Smartphone,
-  Check,
 } from '../../components/icons';
 
 export const MessengerHubView: React.FC = () => {
@@ -36,7 +28,6 @@ export const MessengerHubView: React.FC = () => {
   const properties = db.getTable<Property>('properties');
   const invoices = db.getTable<Invoice>('invoices');
 
-  const [activePlatform, setActivePlatform] = useState<'whatsapp' | 'telegram' | 'discord'>('whatsapp');
   const [selectedTenantId, setSelectedTenantId] = useState<string>(tenants[0]?.id || '');
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>(MESSAGE_TEMPLATES[0].id);
 
@@ -110,8 +101,6 @@ export const MessengerHubView: React.FC = () => {
 
   const handleSendWhatsApp = () => {
     if (!selectedTenant) return;
-    const cleanPhone = selectedTenant.phone.replace(/[^0-9]/g, '');
-    const url = `https://wa.me/${cleanPhone}?text=${encodeURIComponent(customMessage)}`;
 
     db.insertItem<TenantContactLog>('tenant_contact_logs', {
       id: generateUUID(),
@@ -123,99 +112,31 @@ export const MessengerHubView: React.FC = () => {
       created_at: Date.now(),
     });
 
-    if (!navigator.onLine) {
-      navigator.clipboard.writeText(url);
-      showToast({
-        type: 'info',
-        message: 'Offline: WhatsApp link copied to clipboard. Open when online.',
-      });
-      return;
-    }
-    window.open(url, '_blank');
-    showToast({ type: 'success', message: `WhatsApp dispatched for ${selectedTenant.name}` });
-  };
-
-  const handleSendSMS = () => {
-    if (!selectedTenant) return;
-    const cleanPhone = selectedTenant.phone.replace(/[^0-9]/g, '');
-    const url = `sms:${cleanPhone}?body=${encodeURIComponent(customMessage)}`;
-
-    db.insertItem<TenantContactLog>('tenant_contact_logs', {
-      id: generateUUID(),
-      tenant_id: selectedTenant.id,
-      channel: 'sms',
-      summary: `SMS: ${activeTemplate.name}`,
-      details: customMessage,
-      user_name: 'Property Staff',
-      created_at: Date.now(),
-    });
-
-    window.open(url, '_blank');
-    showToast({ type: 'success', message: `SMS composer opened for ${selectedTenant.name}` });
-  };
-
-  const handleSendEmail = () => {
-    if (!selectedTenant) return;
-    const subject = activeTemplate.name;
-    const url = `mailto:${selectedTenant.email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(customMessage)}`;
-
-    db.insertItem<TenantContactLog>('tenant_contact_logs', {
-      id: generateUUID(),
-      tenant_id: selectedTenant.id,
-      channel: 'email',
-      summary: `Email: ${activeTemplate.name}`,
-      details: customMessage,
-      user_name: 'Property Staff',
-      created_at: Date.now(),
-    });
-
-    window.open(url, '_blank');
-    showToast({ type: 'success', message: `Email client opened for ${selectedTenant.name}` });
+    openWhatsAppMessage(selectedTenant.phone, customMessage);
+    showToast({ type: 'success', message: `WhatsApp message dispatched for ${selectedTenant.name}` });
   };
 
   const handleCopyLink = () => {
     if (!selectedTenant) return;
-    const cleanPhone = selectedTenant.phone.replace(/[^0-9]/g, '');
-    const url = `https://wa.me/${cleanPhone}?text=${encodeURIComponent(customMessage)}`;
-    navigator.clipboard.writeText(url);
-    showToast({ type: 'success', message: 'Message link copied to clipboard!' });
+    const clean = cleanPhoneNumber(selectedTenant.phone);
+    const webUrl = `https://wa.me/${clean}?text=${encodeURIComponent(customMessage)}`;
+    navigator.clipboard?.writeText(webUrl);
+    showToast({ type: 'success', message: 'WhatsApp message link copied to clipboard!' });
   };
 
-  const platformCards = [
-    {
-      id: 'whatsapp' as const,
-      name: 'WhatsApp',
-      protocol: 'whatsapp://',
-      webUrl: 'https://web.whatsapp.com',
-      description: 'Open official WhatsApp client or launch WhatsApp Web in your browser.',
-    },
-    {
-      id: 'telegram' as const,
-      name: 'Telegram',
-      protocol: 'tg://',
-      webUrl: 'https://web.telegram.org/a/',
-      description: 'Connect with tenants over Telegram Desktop or Telegram Web.',
-    },
-    {
-      id: 'discord' as const,
-      name: 'Discord',
-      protocol: 'discord://',
-      webUrl: 'https://discord.com/app',
-      description: 'Manage landlord community groups, agency discussions, or tenant servers.',
-    },
-  ];
-
   return (
-    <div className="space-y-6 max-w-7xl mx-auto">
+    <div className="space-y-6 max-w-5xl mx-auto pb-12">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-[var(--text)]">Communications & Messengers Hub</h1>
-          <p className="text-xs text-[var(--text-muted)] mt-0.5">
-            Deep-link dispatch engine &bull; Direct-to-app triggers for WhatsApp, Telegram, Discord, SMS & Email
+          <h1 className="text-2xl font-bold tracking-tight text-[var(--text-primary)]">
+            Messenger Hub & Templates
+          </h1>
+          <p className="text-xs text-[var(--text-secondary)] mt-1">
+            Native WhatsApp dispatch engine &bull; Pre-formatted leasing & rental collection templates
           </p>
         </div>
-        <Badge variant="info">Section 11.13 Deep-Link Engine</Badge>
+        <Badge variant="accent">Dispatch Hub</Badge>
       </div>
 
       {/* Quick Send Composer Box */}
@@ -230,13 +151,13 @@ export const MessengerHubView: React.FC = () => {
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-xs font-medium text-[var(--text-muted)] mb-1">
+            <label className="block text-xs font-medium text-[var(--text-secondary)] mb-1">
               Select Tenant Recipient
             </label>
             <select
               value={selectedTenantId}
               onChange={(e) => handleTenantChange(e.target.value)}
-              className="w-full h-9 rounded-[6px] border border-[var(--border)] bg-[var(--bg)] px-3 text-sm text-[var(--text)] focus-ring"
+              className="w-full h-9 px-3 text-xs rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] cursor-pointer"
             >
               {tenants.map((t) => (
                 <option key={t.id} value={t.id}>
@@ -247,13 +168,13 @@ export const MessengerHubView: React.FC = () => {
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-[var(--text-muted)] mb-1">
+            <label className="block text-xs font-medium text-[var(--text-secondary)] mb-1">
               Message Template
             </label>
             <select
               value={selectedTemplateId}
               onChange={(e) => handleTemplateChange(e.target.value)}
-              className="w-full h-9 rounded-[6px] border border-[var(--border)] bg-[var(--bg)] px-3 text-sm text-[var(--text)] focus-ring"
+              className="w-full h-9 px-3 text-xs rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] cursor-pointer"
             >
               {MESSAGE_TEMPLATES.map((tmpl) => (
                 <option key={tmpl.id} value={tmpl.id}>
@@ -265,105 +186,30 @@ export const MessengerHubView: React.FC = () => {
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-[var(--text-muted)] mb-1">
+          <label className="block text-xs font-medium text-[var(--text-secondary)] mb-1">
             Message Body (Personalized & Editable)
           </label>
           <textarea
             value={customMessage}
             onChange={(e) => setCustomMessage(e.target.value)}
-            rows={4}
-            className="w-full rounded-[6px] border border-[var(--border)] bg-[var(--bg)] p-3 text-sm text-[var(--text)] focus-ring font-sans"
+            rows={5}
+            className="w-full rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] p-3 text-sm text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] font-sans"
           />
         </div>
 
         {/* Action Buttons */}
-        <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-[var(--border)]">
-          <div className="flex flex-wrap gap-2">
-            <Button variant="primary" size="sm" onClick={handleSendWhatsApp} className="gap-1.5">
-              <Send className="w-3.5 h-3.5" />
-              <span>Send WhatsApp</span>
-            </Button>
-            <Button variant="outline" size="sm" onClick={handleSendSMS} className="gap-1.5">
-              <Smartphone className="w-3.5 h-3.5" />
-              <span>Send SMS</span>
-            </Button>
-            <Button variant="outline" size="sm" onClick={handleSendEmail} className="gap-1.5">
-              <Mail className="w-3.5 h-3.5" />
-              <span>Send Email</span>
-            </Button>
-          </div>
+        <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-[var(--border-subtle)]">
+          <Button variant="primary" size="sm" onClick={handleSendWhatsApp} className="gap-2 bg-emerald-600 hover:bg-emerald-700 text-white">
+            <Send className="w-3.5 h-3.5" />
+            <span>Send via WhatsApp</span>
+          </Button>
 
-          <Button variant="ghost" size="sm" onClick={handleCopyLink} className="gap-1.5 text-xs">
+          <Button variant="outline" size="sm" onClick={handleCopyLink} className="gap-1.5 text-xs">
             <Copy className="w-3.5 h-3.5" />
-            <span>Copy Direct Link</span>
+            <span>Copy Message Link</span>
           </Button>
         </div>
       </Card>
-
-      {/* Platform Launchers Header & Cards */}
-      <div className="space-y-4">
-        <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)]">
-          Desktop & Web Messenger Launchers
-        </h2>
-
-        {/* Tab switcher */}
-        <div className="flex gap-2 border-b border-[var(--border)] pb-2">
-          {platformCards.map((p) => (
-            <button
-              key={p.id}
-              onClick={() => setActivePlatform(p.id)}
-              className={`px-4 py-2 rounded-[6px] text-xs font-semibold transition-all cursor-pointer ${
-                activePlatform === p.id
-                  ? 'bg-[var(--accent)] text-white shadow-xs'
-                  : 'text-[var(--text-muted)] hover:bg-[var(--surface)] hover:text-[var(--text)]'
-              }`}
-            >
-              {p.name}
-            </button>
-          ))}
-        </div>
-
-        {/* Selected platform card */}
-        {(() => {
-          const card = platformCards.find((c) => c.id === activePlatform)!;
-          return (
-            <Card className="p-6 space-y-4">
-              <div className="flex items-center gap-3">
-                <div className="w-12 h-12 rounded-[8px] bg-[var(--accent-subtle)] text-[var(--accent)] flex items-center justify-center font-bold text-lg">
-                  <MessageSquare className="w-6 h-6" />
-                </div>
-                <div>
-                  <h3 className="text-base font-bold text-[var(--text)]">{card.name} Gateway</h3>
-                  <p className="text-xs text-[var(--text-muted)]">{card.description}</p>
-                </div>
-              </div>
-
-              <div className="flex flex-wrap gap-3 pt-2">
-                <Button
-                  variant="primary"
-                  onClick={() => {
-                    window.open(card.protocol, '_blank');
-                    showToast({ type: 'info', message: `Attempting to launch native ${card.name} desktop app...` });
-                  }}
-                  className="gap-2"
-                >
-                  <Smartphone className="w-4 h-4" />
-                  <span>Open {card.name} Desktop App</span>
-                </Button>
-
-                <Button
-                  variant="outline"
-                  onClick={() => window.open(card.webUrl, '_blank')}
-                  className="gap-2"
-                >
-                  <ExternalLink className="w-4 h-4" />
-                  <span>Open {card.name} Web in Browser</span>
-                </Button>
-              </div>
-            </Card>
-          );
-        })()}
-      </div>
     </div>
   );
 };

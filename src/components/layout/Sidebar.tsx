@@ -22,6 +22,7 @@ import {
   ShieldCheck,
   Folder,
   UserCheck,
+  Calendar,
 } from '../icons';
 
 export interface SidebarProps {
@@ -42,24 +43,49 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpenMobile, onCloseMobile })
     });
   };
 
-  const navItems = [
-    { to: '/', label: 'Dashboard', icon: Home },
-    { to: '/properties', label: 'Properties & Units', icon: Building2 },
-    { to: '/map', label: 'Interactive Map', icon: Map },
-    { to: '/tenants', label: 'Tenants Directory', icon: Users },
-    { to: '/leases', label: 'Leases & Deposits', icon: FileText },
-    { to: '/invoices', label: 'Rent Roll & Invoicing', icon: Receipt },
-    { to: '/utility-splitter', label: 'Utility Bill Splitter', icon: Calculator },
-    { to: '/area-calculator', label: 'Land Area Calculator', icon: Layers },
-    { to: '/messenger', label: 'Messenger Hub', icon: MessageSquare },
-    { to: '/maintenance', label: 'Maintenance Board', icon: Wrench },
-    { to: '/vendors', label: 'Vendors', icon: HardHat },
-    { to: '/expenses', label: 'Expenses & Income', icon: Banknote },
-    { to: '/documents', label: 'Document Vault', icon: Folder },
-    { to: '/owners', label: 'Owner Statements', icon: UserCheck },
-    { to: '/reports', label: 'Reports & Statements', icon: BarChart3 },
-    { to: '/sync', label: 'Drive Sync & Backup', icon: RefreshCw },
-    { to: '/settings', label: 'Settings', icon: Settings },
+  const navSections = [
+    {
+      category: 'PROPERTY',
+      items: [
+        { to: '/', label: 'Dashboard', icon: Home },
+        { to: '/properties', label: 'Properties & Units', icon: Building2 },
+        { to: '/map', label: 'Interactive Map', icon: Map },
+        { to: '/maintenance', label: 'Maintenance Board', icon: Wrench },
+      ],
+    },
+    {
+      category: 'PEOPLE',
+      items: [
+        { to: '/tenants', label: 'Tenants Directory', icon: Users },
+        { to: '/leases', label: 'Leases & Deposits', icon: FileText },
+        { to: '/vendors', label: 'Vendors', icon: HardHat },
+      ],
+    },
+    {
+      category: 'FINANCE',
+      items: [
+        { to: '/invoices', label: 'Rent Roll & Invoicing', icon: Receipt },
+        { to: '/utility-splitter', label: 'Utility Bill Splitter', icon: Calculator },
+        { to: '/expenses', label: 'Expenses & Income', icon: Banknote },
+        { to: '/owners', label: 'Owner Statements', icon: UserCheck },
+        { to: '/reports', label: 'Reports & Statements', icon: BarChart3 },
+      ],
+    },
+    {
+      category: 'TOOLS',
+      items: [
+        { to: '/calendar', label: 'Calendar & Tasks', icon: Calendar },
+        { to: '/area-calculator', label: 'Land Area Calculator', icon: Layers },
+        { to: '/documents', label: 'Document Vault', icon: Folder },
+      ],
+    },
+    {
+      category: 'SYSTEM',
+      items: [
+        { to: '/sync', label: 'Drive Sync & Backup', icon: RefreshCw },
+        { to: '/settings', label: 'Settings', icon: Settings },
+      ],
+    },
   ];
 
   return (
@@ -83,9 +109,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpenMobile, onCloseMobile })
         {/* Brand Header */}
         <div className="h-16 flex items-center justify-between px-5 border-b border-[var(--border-subtle)]">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-xl bg-[var(--accent)] flex items-center justify-center text-white font-bold text-sm shrink-0 shadow-xs">
-              RF
-            </div>
+            <img
+              src="/assets/icon.png"
+              alt="RentFlow"
+              className="w-8 h-8 object-contain rounded-xl shrink-0"
+            />
             <div
               className={`flex flex-col transition-opacity duration-150 ${
                 isCollapsed ? 'md:hidden' : 'md:hidden lg:flex'
@@ -109,62 +137,56 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpenMobile, onCloseMobile })
           </button>
         </div>
 
-        {/* Navigation Links */}
-        <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            return (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                onClick={onCloseMobile}
-                title={item.label}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs transition-all duration-150 ${
-                    isCollapsed ? 'md:justify-center' : 'md:justify-center lg:justify-start'
-                  } ${
-                    isActive
-                      ? 'bg-[var(--accent)]/10 text-[var(--accent)] font-semibold shadow-xs'
-                      : 'text-[var(--text-secondary)] hover:bg-[var(--bg-base)] hover:text-[var(--text-primary)] font-medium'
-                  }`
-                }
+        {/* Navigation Sections */}
+        <nav className="flex-1 p-3 space-y-4 overflow-y-auto">
+          {navSections.map((section, sIdx) => (
+            <div key={section.category} className="space-y-1">
+              <div
+                className={`px-3 pt-2 pb-1 text-[10px] font-bold uppercase tracking-wider text-[var(--text-subtle)] select-none ${
+                  isCollapsed ? 'md:hidden' : 'md:hidden lg:block'
+                }`}
               >
-                <Icon className="w-4 h-4 shrink-0" />
-                <span
-                  className={`truncate ${
-                    isCollapsed ? 'md:hidden' : 'md:hidden lg:inline'
-                  }`}
-                >
-                  {item.label}
-                </span>
-              </NavLink>
-            );
-          })}
+                {section.category}
+              </div>
+              {isCollapsed && sIdx > 0 && (
+                <div className="hidden md:block lg:hidden my-2 border-t border-[var(--border-subtle)]" />
+              )}
+              {section.items.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    end={item.to === '/'}
+                    onClick={onCloseMobile}
+                    title={item.label}
+                    className={({ isActive }) =>
+                      `flex items-center gap-3 px-3 py-2 rounded-xl text-xs transition-all duration-150 ${
+                        isCollapsed ? 'md:justify-center' : 'md:justify-center lg:justify-start'
+                      } ${
+                        isActive
+                          ? 'bg-[var(--accent)]/10 text-[var(--accent)] font-semibold shadow-xs'
+                          : 'text-[var(--text-secondary)] hover:bg-[var(--bg-base)] hover:text-[var(--text-primary)] font-medium'
+                      }`
+                    }
+                  >
+                    <Icon className="w-4 h-4 shrink-0" />
+                    <span
+                      className={`truncate ${
+                        isCollapsed ? 'md:hidden' : 'md:hidden lg:inline'
+                      }`}
+                    >
+                      {item.label}
+                    </span>
+                  </NavLink>
+                );
+              })}
+            </div>
+          ))}
         </nav>
 
-        {/* Bottom Section: Offline Status & Collapsible Toggle */}
+        {/* Bottom Section: Collapsible Toggle */}
         <div className="p-3 border-t border-[var(--border-subtle)] space-y-2 bg-[var(--bg-surface)]">
-          {/* Offline Engine Status */}
-          <div
-            className={`flex items-center gap-2.5 px-3 py-2 rounded-xl bg-[var(--bg-base)] border border-[var(--border-subtle)] ${
-              isCollapsed ? 'md:justify-center' : 'md:justify-center lg:justify-start'
-            }`}
-          >
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-            <div
-              className={`flex flex-col ${
-                isCollapsed ? 'md:hidden' : 'md:hidden lg:flex'
-              }`}
-            >
-              <span className="text-[11px] font-semibold text-[var(--text-primary)]">
-                Offline Engine
-              </span>
-              <span className="text-[9px] text-[var(--text-secondary)] font-mono">
-                Zero-Cloud Latency
-              </span>
-            </div>
-          </div>
-
           {/* Desktop Collapse Toggle */}
           <button
             onClick={toggleCollapse}

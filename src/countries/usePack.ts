@@ -16,7 +16,7 @@ export const usePackStore = create<PackStoreState>((set) => {
   const savedOrg = db.getTable<Organization>('organizations')[0];
   const initialCode =
     savedOrg?.country_code ||
-    localStorage.getItem('rentflow_active_country_code') ||
+    (typeof localStorage !== 'undefined' ? localStorage.getItem('rentflow_active_country_code') : null) ||
     'US';
 
   return {
@@ -24,7 +24,9 @@ export const usePackStore = create<PackStoreState>((set) => {
     packVersion: 1,
     setCountryCode: (code: string) => {
       const upper = (code || 'US').toUpperCase();
-      localStorage.setItem('rentflow_active_country_code', upper);
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('rentflow_active_country_code', upper);
+      }
 
       // Update in organizations table if exists
       const org = db.getTable<Organization>('organizations')[0];

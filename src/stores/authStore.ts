@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { GOOGLE_CLIENT_ID } from '../config/google';
-import { requestFreshAccessToken } from '../lib/googleDriveService';
+import { requestFreshAccessToken, isNonOAuthToken } from '../lib/googleDriveService';
+import { isTauri, tauriGoogleLogout } from '../lib/tauri/bridge';
 
 export interface UserProfile {
   sub: string;
@@ -40,8 +41,8 @@ function getStoredProfile(): UserProfile | null {
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: getStoredProfile(),
-  accessToken: localStorage.getItem(STORAGE_TOKEN_KEY) || null,
-  driveFileId: localStorage.getItem(STORAGE_DRIVE_FILE_ID_KEY) || null,
+  accessToken: typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_TOKEN_KEY) || null : null,
+  driveFileId: typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_DRIVE_FILE_ID_KEY) || null : null,
   // Persistent login: If user profile exists in localStorage, immediately set to logged in!
   isAuthenticated: !!getStoredProfile(),
   isAuthenticating: false,
@@ -93,13 +94,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   signOut: async () => {
+    if (isTauri()) {
+      try {
+        await tauriGoogleLogout();
+      } catch (e) {
+        console.warn('Error logging out from Tauri backend:', e);
+      }
+    }
+
     const token = get().accessToken;
-    if (token) {
+    if (!isNonOAuthToken(token) && token) {
       try {
         await fetch('https://oauth2.googleapis.com/revoke', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: `token=${token}`,
+          body: `token=${encodeURIComponent(token)}`,
         });
       } catch (e) {
         console.warn('Error revoking token:', e);
