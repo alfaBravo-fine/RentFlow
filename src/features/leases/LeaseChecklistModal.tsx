@@ -4,7 +4,7 @@ import { usePack } from '../../countries/usePack';
 import { generateUUID } from '../../lib/uuid';
 import { useToast } from '../../components/toast/ToastContext';
 import { Modal } from '../../components/ui/Modal';
-import { handlePrint } from '../../lib/print';
+import { usePrint } from '../../components/print/PrintContext';
 import { Button } from '../../components/ui/Button';
 import { Badge } from '../../components/ui/Badge';
 import { Input, Select } from '../../components/ui/Input';
@@ -13,14 +13,8 @@ import {
   Clock,
   Plus,
   Trash2,
-  Upload,
   Camera,
-  AlertCircle,
-  FileCheck,
   Printer,
-  ShieldCheck,
-  Check,
-  X,
 } from '../../components/icons';
 
 export interface ChecklistItem {
@@ -63,6 +57,7 @@ export const LeaseChecklistModal: React.FC<LeaseChecklistModalProps> = ({
 }) => {
   const pack = usePack();
   const { showToast } = useToast();
+  const { printReport } = usePrint();
 
   const [activeTab, setActiveTab] = useState<'move_in' | 'move_out'>('move_in');
   const [items, setItems] = useState<ChecklistItem[]>([]);
@@ -181,7 +176,109 @@ export const LeaseChecklistModal: React.FC<LeaseChecklistModalProps> = ({
 
   const currentTabItems = items.filter((it) => it.type === activeTab);
   const passedCount = currentTabItems.filter((it) => it.status === 'passed').length;
-  const issuesCount = currentTabItems.filter((it) => it.status === 'needs_repair' || it.status === 'failed').length;
+  const issuesCount = currentTabItems.filter(
+    (it) => it.status === 'needs_repair' || it.status === 'failed'
+  ).length;
+  const pendingCount = currentTabItems.filter((it) => it.status === 'pending').length;
+
+  const handlePrintCertificate = () => {
+    const inspectionTitle =
+      activeTab === 'move_in'
+        ? 'Move-In Property Condition Inspection Certificate'
+        : 'Move-Out Property Condition Inspection Certificate';
+    const generatedAt = new Date().toLocaleDateString(pack.locale || 'en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    });
+
+    printReport(
+      <div className="print-area bg-white text-black w-full max-w-[800px] mx-auto font-sans p-8 space-y-6">
+        <div className="flex items-start justify-between pb-5 border-b-2 border-gray-900 gap-6">
+          <div>
+            <h1 className="text-xl font-bold text-black">{inspectionTitle}</h1>
+            <p className="text-xs text-gray-700 mt-1">
+              Tenant: <strong>{tenant?.name || 'Resident'}</strong> &middot; Unit:{' '}
+              <strong>{unit?.name || 'Rental Unit'}</strong>
+            </p>
+            <p className="text-xs text-gray-600 mt-0.5">
+              Lease Term: {lease.start_date} to {lease.end_date} &middot; Issued: {generatedAt}
+            </p>
+          </div>
+          <div className="text-right text-xs text-gray-700 shrink-0">
+            <div className="font-bold text-black">Certificate Ref: {lease.id.slice(0, 8).toUpperCase()}</div>
+            <div className="mt-1">
+              Passed: {passedCount} &middot; Issues: {issuesCount} &middot; Pending: {pendingCount}
+            </div>
+          </div>
+        </div>
+
+        <table className="w-full text-left text-xs border-collapse">
+          <thead>
+            <tr className="border-b-2 border-gray-800 font-bold uppercase text-gray-800">
+              <th className="py-2 pr-3">Category</th>
+              <th className="py-2 pr-3">Inspection Item &amp; Notes</th>
+              <th className="py-2 text-right">Status</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-200">
+            {currentTabItems.map((item) => {
+              const statusLabel =
+                item.status === 'passed'
+                  ? 'PASSED'
+                  : item.status === 'needs_repair'
+                  ? 'NEEDS REPAIR'
+                  : item.status === 'failed'
+                  ? 'FAILED'
+                  : 'PENDING';
+
+              return (
+                <tr key={item.id} className="break-inside-avoid">
+                  <td className="py-2.5 pr-3 align-top font-semibold text-gray-700 whitespace-nowrap">
+                    {item.category}
+                  </td>
+                  <td className="py-2.5 pr-3 align-top text-black">
+                    <div className="font-semibold">{item.title}</div>
+                    {item.notes && (
+                      <div className="text-gray-700 mt-1">Notes: {item.notes}</div>
+                    )}
+                    {item.photoTimestamp && (
+                      <div className="text-[11px] text-gray-500 mt-0.5">
+                        Photo Timestamp: {item.photoTimestamp}
+                      </div>
+                    )}
+                    {item.photoData && (
+                      <div className="mt-2">
+                        <img
+                          src={item.photoData}
+                          alt={item.title}
+                          style={{ maxWidth: '180px', maxHeight: '110px', objectFit: 'cover', borderRadius: '6px' }}
+                        />
+                      </div>
+                    )}
+                  </td>
+                  <td className="py-2.5 align-top text-right font-bold whitespace-nowrap">
+                    {statusLabel}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+
+        <div className="grid grid-cols-2 gap-8 pt-10 break-inside-avoid">
+          <div className="border-t border-gray-800 pt-2 text-xs text-gray-700">
+            <div className="font-bold text-black">Landlord / Property Inspector Signature</div>
+            <div className="mt-1">Date: ______________________</div>
+          </div>
+          <div className="border-t border-gray-800 pt-2 text-xs text-gray-700">
+            <div className="font-bold text-black">Tenant Acknowledgment Signature ({tenant?.name || 'Tenant'})</div>
+            <div className="mt-1">Date: ______________________</div>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <Modal
@@ -191,11 +288,12 @@ export const LeaseChecklistModal: React.FC<LeaseChecklistModalProps> = ({
       description={`Unit condition verification & timestamped evidence for ${tenant?.name || 'Tenant'} (${unit?.name || 'Unit'})`}
       maxWidth="2xl"
     >
-      <div className="space-y-6">
+      <div className="space-y-5 min-w-0 w-full max-w-full">
         {/* Inspection Type Tabs */}
-        <div className="flex items-center justify-between border-b border-[var(--border-subtle)] pb-3">
-          <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-3 min-w-0">
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
             <button
+              type="button"
               onClick={() => setActiveTab('move_in')}
               className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
                 activeTab === 'move_in'
@@ -206,6 +304,7 @@ export const LeaseChecklistModal: React.FC<LeaseChecklistModalProps> = ({
               Move-In Inspection (Arrival)
             </button>
             <button
+              type="button"
               onClick={() => setActiveTab('move_out')}
               className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
                 activeTab === 'move_out'
@@ -217,42 +316,49 @@ export const LeaseChecklistModal: React.FC<LeaseChecklistModalProps> = ({
             </button>
           </div>
 
-          <div className="flex items-center gap-2 text-xs">
+          <div className="flex items-center gap-2 text-xs shrink-0">
             <Badge variant="success">{passedCount} Passed</Badge>
             {issuesCount > 0 && <Badge variant="danger">{issuesCount} Issue(s)</Badge>}
           </div>
         </div>
 
         {/* Add Custom Item */}
-        <form onSubmit={handleAddItem} className="p-3 rounded-xl bg-[var(--bg-base)] border border-[var(--border-subtle)] flex items-center gap-2">
-          <Input
-            type="text"
-            placeholder="e.g. Balcony railing secure & painted..."
-            value={newItemTitle}
-            onChange={(e) => setNewItemTitle(e.target.value)}
-            className="text-xs h-8 flex-1"
-            required
-          />
-          <Select
-            value={newItemCategory}
-            onChange={(e) => setNewItemCategory(e.target.value)}
-            className="text-xs h-8 w-36"
-          >
-            <option value="General">General</option>
-            <option value="Flooring">Flooring</option>
-            <option value="Appliances">Appliances</option>
-            <option value="Bathrooms">Bathrooms</option>
-            <option value="Life Safety">Life Safety</option>
-            <option value="Keys">Keys</option>
-          </Select>
-          <Button type="submit" size="sm" variant="primary" className="h-8 gap-1 shrink-0">
+        <form
+          onSubmit={handleAddItem}
+          className="p-3 rounded-xl bg-[var(--bg-base)] border border-[var(--border-subtle)] flex flex-col sm:flex-row sm:items-center gap-2 min-w-0 w-full"
+        >
+          <div className="flex-1 min-w-0 w-full">
+            <Input
+              type="text"
+              placeholder="e.g. Balcony railing secure & painted..."
+              value={newItemTitle}
+              onChange={(e) => setNewItemTitle(e.target.value)}
+              className="text-xs h-9 w-full max-w-full"
+              required
+            />
+          </div>
+          <div className="w-full sm:w-40 shrink-0 min-w-0">
+            <Select
+              value={newItemCategory}
+              onChange={(e) => setNewItemCategory(e.target.value)}
+              className="text-xs h-9 w-full max-w-full"
+            >
+              <option value="General">General</option>
+              <option value="Flooring">Flooring</option>
+              <option value="Appliances">Appliances</option>
+              <option value="Bathrooms">Bathrooms</option>
+              <option value="Life Safety">Life Safety</option>
+              <option value="Keys">Keys</option>
+            </Select>
+          </div>
+          <Button type="submit" size="sm" variant="primary" className="h-9 gap-1 shrink-0">
             <Plus className="w-3.5 h-3.5" />
             <span>Add Item</span>
           </Button>
         </form>
 
-        {/* Inspection Items List */}
-        <div className="print-area bg-white text-black space-y-3 max-h-[480px] overflow-y-auto pr-1">
+        {/* Inspection Items List (Clean flex-col gap-4 without rogue white backgrounds) */}
+        <div className="flex flex-col gap-4 max-h-[460px] overflow-y-auto pr-1 min-w-0 w-full">
           {currentTabItems.length === 0 ? (
             <div className="text-center py-8 text-xs text-[var(--text-secondary)]">
               No checklist items recorded yet.
@@ -261,20 +367,20 @@ export const LeaseChecklistModal: React.FC<LeaseChecklistModalProps> = ({
             currentTabItems.map((item) => (
               <div
                 key={item.id}
-                className="p-4 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-[var(--border-strong)] transition-all space-y-3"
+                className="p-4 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-[var(--border-strong)] transition-all flex flex-col gap-3 min-w-0 w-full"
               >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="space-y-0.5">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--text-subtle)]">
+                <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3 min-w-0">
+                  <div className="space-y-0.5 min-w-0 flex-1">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--text-subtle)] block truncate">
                       {item.category}
                     </span>
-                    <h4 className="text-xs font-bold text-[var(--text-primary)]">
+                    <h4 className="text-xs font-bold text-[var(--text-primary)] break-words">
                       {item.title}
                     </h4>
                   </div>
 
                   {/* Status Selection Buttons */}
-                  <div className="flex items-center gap-1 shrink-0">
+                  <div className="flex items-center gap-1 shrink-0 flex-wrap">
                     <button
                       type="button"
                       onClick={() => handleStatusChange(item.id, 'passed')}
@@ -325,15 +431,15 @@ export const LeaseChecklistModal: React.FC<LeaseChecklistModalProps> = ({
                   placeholder="Inspector notes or observed defect details..."
                   value={item.notes || ''}
                   onChange={(e) => handleNotesChange(item.id, e.target.value)}
-                  className="w-full h-8 px-2.5 text-xs rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
+                  className="w-full max-w-full min-w-0 px-3 py-2 text-sm text-[var(--text-primary)] placeholder:text-gray-400 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-base)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
                 />
 
                 {/* Timestamped Photo Attachment */}
-                <div className="flex items-center justify-between pt-1 text-xs">
-                  <div className="flex items-center gap-3">
-                    <label className="inline-flex items-center gap-1.5 cursor-pointer text-xs font-medium text-[var(--accent)] hover:underline">
-                      <Camera className="w-3.5 h-3.5" />
-                      <span>{item.photoData ? 'Replace Photo' : 'Attach Timestamped Photo'}</span>
+                <div className="flex items-center justify-between gap-3 pt-1 text-sm text-gray-400 min-w-0 flex-wrap">
+                  <div className="flex items-center gap-3 min-w-0 flex-wrap">
+                    <label className="inline-flex items-center gap-1.5 cursor-pointer text-sm font-medium text-[var(--accent)] hover:underline min-w-0">
+                      <Camera className="w-4 h-4 shrink-0" />
+                      <span className="truncate">{item.photoData ? 'Replace Photo' : 'Attach Timestamped Photo'}</span>
                       <input
                         type="file"
                         accept="image/*"
@@ -343,16 +449,16 @@ export const LeaseChecklistModal: React.FC<LeaseChecklistModalProps> = ({
                     </label>
 
                     {item.photoTimestamp && (
-                      <span className="text-[11px] font-mono text-[var(--text-subtle)] flex items-center gap-1">
-                        <Clock className="w-3 h-3" />
-                        <span>{item.photoTimestamp}</span>
+                      <span className="text-xs font-mono text-gray-400 flex items-center gap-1 min-w-0">
+                        <Clock className="w-3.5 h-3.5 shrink-0" />
+                        <span className="truncate">{item.photoTimestamp}</span>
                       </span>
                     )}
                   </div>
 
                   {item.completedAt && (
-                    <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold flex items-center gap-1">
-                      <CheckCircle2 className="w-3 h-3" />
+                    <span className="text-xs text-emerald-600 dark:text-emerald-400 font-semibold flex items-center gap-1 shrink-0">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
                       <span>Verified</span>
                     </span>
                   )}
@@ -360,11 +466,11 @@ export const LeaseChecklistModal: React.FC<LeaseChecklistModalProps> = ({
 
                 {/* Photo Preview with Verified Timestamp Stamp */}
                 {item.photoData && (
-                  <div className="relative rounded-xl overflow-hidden border border-[var(--border-strong)] mt-2 inline-block max-w-[220px]">
+                  <div className="relative rounded-xl overflow-hidden border border-[var(--border-strong)] mt-1 inline-block max-w-[220px]">
                     <img src={item.photoData} alt={item.title} className="w-full h-28 object-cover" />
-                    <div className="absolute bottom-0 inset-x-0 bg-black/70 backdrop-blur-xs px-2 py-1 text-[10px] text-white font-mono flex items-center justify-between">
-                      <span>Verified Timestamp</span>
-                      <span>{item.photoTimestamp}</span>
+                    <div className="absolute bottom-0 inset-x-0 bg-black/70 backdrop-blur-xs px-2 py-1 text-[10px] text-white font-mono flex items-center justify-between gap-2">
+                      <span className="truncate">Verified Timestamp</span>
+                      <span className="truncate">{item.photoTimestamp}</span>
                     </div>
                   </div>
                 )}
@@ -374,11 +480,11 @@ export const LeaseChecklistModal: React.FC<LeaseChecklistModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between pt-4 border-t border-[var(--border-subtle)] no-print">
+        <div className="flex items-center justify-between gap-3 pt-4 border-t border-[var(--border-subtle)] no-print min-w-0 flex-wrap">
           <Button variant="outline" size="sm" onClick={onClose}>
             Close
           </Button>
-          <Button variant="primary" size="sm" onClick={() => handlePrint()} className="gap-2">
+          <Button variant="primary" size="sm" onClick={handlePrintCertificate} className="gap-2">
             <Printer className="w-3.5 h-3.5" />
             <span>Print Inspection Certificate</span>
           </Button>

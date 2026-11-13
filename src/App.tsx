@@ -14,6 +14,7 @@ import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { KeyboardShortcutsModal } from './components/layout/KeyboardShortcutsModal';
 import { GOOGLE_CLIENT_ID } from './config/google';
 import { PrintProvider } from './components/print/PrintContext';
+import { GoogleOAuthProvider } from '@react-oauth/google';
 import { SplashScreen } from './components/common/SplashScreen';
 import { databaseService } from './db/DatabaseService';
 
@@ -151,7 +152,9 @@ export default function App() {
           <ToastProvider>
             <PrintProvider>
               {!isAuthenticated || !user ? (
-                <LoginView />
+                <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
+                  <LoginView />
+                </GoogleOAuthProvider>
               ) : (
                 <QueryClientProvider client={queryClient}>
                   <AuthenticatedApp />

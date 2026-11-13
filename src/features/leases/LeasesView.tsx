@@ -1,6 +1,6 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { db } from '../../db/client';
-import { Lease, Tenant, Unit, Deposit, Property } from '../../db/schema';
+import React, { useState, useEffect } from 'react';
+import { db, parseDepositDeductions } from '../../db/client';
+import { Lease, Tenant, Unit, Deposit, DepositDeduction, Property } from '../../db/schema';
 import { usePack } from '../../countries/usePack';
 import { formatMoney } from '../../lib/money';
 import { accrueDepositInterest } from '../../lib/interest';
@@ -30,6 +30,7 @@ import {
   Building2,
   Users,
   FileCheck,
+  Eye,
 } from '../../components/icons';
 import { LeaseChecklistModal } from './LeaseChecklistModal';
 
@@ -40,9 +41,15 @@ export const LeasesView: React.FC = () => {
   const [leases, setLeases] = useState<Lease[]>(() => db.getTable<Lease>('leases'));
   const tenants = db.getTable<Tenant>('tenants').filter((t) => !t.deleted_at);
   const properties = db.getTable<Property>('properties').filter((p) => !p.deleted_at);
-  const units = db.getTable<Unit>('units').filter((u) => !u.deleted_at);
-  const validUnits = units.filter((u) => properties.some((p) => p.id === u.property_id));
+  const [units, setUnits] = useState<Unit[]>(() => db.getTable<Unit>('units'));
+  const validUnits = units.filter(
+    (u) => !u.deleted_at && !(u as any).deletedAt && properties.some((p) => p.id === u.property_id)
+  );
+  const vacantUnits = validUnits.filter((u) => u.status === 'vacant');
   const [deposits, setDeposits] = useState<Deposit[]>(() => db.getTable<Deposit>('deposits'));
+  const [depositDeductions, setDepositDeductions] = useState<DepositDeduction[]>(() =>
+    db.getTable<DepositDeduction>('deposit_deductions')
+  );
 
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('grid');
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
@@ -50,9 +57,14 @@ export const LeasesView: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingLease, setEditingLease] = useState<Lease | null>(null);
   const [checklistLease, setChecklistLease] = useState<Lease | null>(null);
+  const [detailsLeaseId, setDetailsLeaseId] = useState<string | null>(null);
+
+  const selectableUnits = editingLease
+    ? validUnits.filter((u) => u.status === 'vacant' || u.id === editingLease.unit_id)
+    : vacantUnits;
 
   // Form states
-  const [unitId, setUnitId] = useState(validUnits[0]?.id || '');
+  const [unitId, setUnitId] = useState(vacantUnits[0]?.id || '');
   const [tenantId, setTenantId] = useState(tenants[0]?.id || '');
   const [startDate, setStartDate] = useState('2026-11-01');
   const [endDate, setEndDate] = useState('2027-10-31');
@@ -66,8 +78,7 @@ export const LeasesView: React.FC = () => {
   const [isDeductionModalOpen, setIsDeductionModalOpen] = useState(false);
   const [deductionLeaseId, setDeductionLeaseId] = useState<string | null>(null);
   const [deductionItems, setDeductionItems] = useState<Array<{ id: string; reason: string; amount: string }>>([
-    { id: '1', reason: 'Patching and painting living room walls', amount: '120' },
-    { id: '2', reason: 'Professional carpet deep cleaning', amount: '80' },
+    { id: generateUUID(), reason: '', amount: '' },
   ]);
   const [receiptAttachmentNote, setReceiptAttachmentNote] = useState('');
 
@@ -81,25 +92,28 @@ export const LeasesView: React.FC = () => {
     return () => window.removeEventListener('click', handleOutside);
   }, []);
 
-  // Subscribe to reactive DB writes so Leases stay synchronized
+  // Subscribe to reactive DB writes so Leases, Units & Deposits stay synchronized
   useEffect(() => {
     const unsub = db.onWrite(() => {
       setLeases(db.getTable<Lease>('leases'));
+      setUnits(db.getTable<Unit>('units'));
       setDeposits(db.getTable<Deposit>('deposits'));
+      setDepositDeductions(db.getTable<DepositDeduction>('deposit_deductions'));
     });
     return unsub;
   }, []);
 
   const handleOpenAdd = () => {
     setEditingLease(null);
-    setUnitId(validUnits[0]?.id || '');
+    const firstVacant = vacantUnits[0];
+    setUnitId(firstVacant?.id || '');
     setTenantId(tenants[0]?.id || '');
     setStartDate(new Date().toISOString().split('T')[0]);
     const nextYear = new Date();
     nextYear.setFullYear(nextYear.getFullYear() + 1);
     setEndDate(nextYear.toISOString().split('T')[0]);
-    setRentAmount(validUnits[0] ? String(validUnits[0].rent_minor / 100) : '1850');
-    setDepositAmount(validUnits[0] ? String(validUnits[0].rent_minor / 100) : '1850');
+    setRentAmount(firstVacant ? String(firstVacant.rent_minor / 100) : '1850');
+    setDepositAmount(firstVacant ? String(firstVacant.rent_minor / 100) : '1850');
     setBillingCycle('monthly');
     setDueDay(String(pack.billingDueDayDefault || 1));
     setLeaseStatus('active');
@@ -288,57 +302,126 @@ export const LeasesView: React.FC = () => {
     );
   };
 
+  const handleOpenDeductionModal = (leaseId: string) => {
+    setDeductionLeaseId(leaseId);
+    setDeductionItems([{ id: generateUUID(), reason: '', amount: '' }]);
+    setReceiptAttachmentNote('');
+    setIsDeductionModalOpen(true);
+  };
+
+  const getDepositLedgerForLease = (lease: Lease) => {
+    const deposit = deposits.find((d) => d.lease_id === lease.id);
+    const originalDepositMinor = deposit?.amount_minor ?? lease.deposit_minor ?? 0;
+
+    const ledgerRows = deposit
+      ? depositDeductions.filter(
+          (dd) =>
+            (dd.deposit_id === deposit.id || dd.lease_id === lease.id) &&
+            !dd.deleted_at &&
+            !(dd as any).deletedAt
+        )
+      : depositDeductions.filter(
+          (dd) => dd.lease_id === lease.id && !dd.deleted_at && !(dd as any).deletedAt
+        );
+
+    const parsedJsonRows = parseDepositDeductions(deposit?.deductions_json);
+
+    const historyItems =
+      ledgerRows.length > 0
+        ? ledgerRows
+            .slice()
+            .sort((a, b) => (b.created_at || 0) - (a.created_at || 0))
+            .map((row) => ({
+              id: row.id,
+              date: row.deducted_at
+                ? new Date(row.deducted_at).toLocaleDateString(pack.locale || 'en-US', {
+                    year: 'numeric',
+                    month: 'short',
+                    day: 'numeric',
+                  })
+                : new Date(row.created_at).toLocaleDateString(pack.locale || 'en-US', {
+                    year: 'numeric',
+                    month: 'short',
+                    day: 'numeric',
+                  }),
+              reason: row.reason,
+              notes: row.receipt_note || '',
+              amountMinor: Number(row.amount_minor) || 0,
+            }))
+        : parsedJsonRows.map((row) => ({
+            id: row.id || generateUUID(),
+            date: row.date
+              ? new Date(row.date).toLocaleDateString(pack.locale || 'en-US', {
+                  year: 'numeric',
+                  month: 'short',
+                  day: 'numeric',
+                })
+              : '—',
+            reason: row.reason,
+            notes: '',
+            amountMinor: Number(row.amount_minor) || 0,
+          }));
+
+    const totalDeductionsMinor = historyItems.reduce((sum, item) => sum + item.amountMinor, 0);
+    const remainingBalanceMinor = Math.max(0, originalDepositMinor - totalDeductionsMinor);
+
+    const accruedInterestMinor = deposit
+      ? accrueDepositInterest({
+          principalMinor: remainingBalanceMinor,
+          pack,
+          from: deposit.received_at,
+          to: new Date(),
+        })
+      : 0;
+
+    return {
+      deposit,
+      originalDepositMinor,
+      historyItems,
+      totalDeductionsMinor,
+      remainingBalanceMinor,
+      accruedInterestMinor,
+    };
+  };
+
   const handleRecordDeduction = (e: React.FormEvent) => {
     e.preventDefault();
     if (!deductionLeaseId) return;
 
-    const deposit = deposits.find((d) => d.lease_id === deductionLeaseId);
-    if (!deposit) {
-      showToast({ type: 'error', message: 'No security deposit found for this lease!' });
-      return;
-    }
-
     const validDeductions = deductionItems
-      .filter((item) => item.reason.trim() && parseFloat(item.amount) > 0)
+      .filter((item) => item.reason.trim() && (parseFloat(item.amount) || 0) > 0)
       .map((item) => ({
         id: item.id || generateUUID(),
         reason: item.reason.trim(),
-        amount_minor: Math.round(parseFloat(item.amount) * 100),
-        date: new Date().toISOString(),
+        amountMinor: Math.round((parseFloat(item.amount) || 0) * 100),
       }));
 
-    const totalDeductedMinor = validDeductions.reduce((sum, item) => sum + item.amount_minor, 0);
-    const remainingRefundMinor = Math.max(0, deposit.amount_minor - totalDeductedMinor);
-
-    let nextStatus: 'returned' | 'partially_returned' | 'forfeited' = 'partially_returned';
-    if (totalDeductedMinor === 0) {
-      nextStatus = 'returned';
-    } else if (totalDeductedMinor >= deposit.amount_minor) {
-      nextStatus = 'forfeited';
+    if (validDeductions.length === 0) {
+      showToast({
+        type: 'error',
+        message: 'Please enter a valid deduction reason and positive amount.',
+      });
+      return;
     }
 
-    const payload = {
-      deductions: validDeductions,
-      total_deductions_minor: totalDeductedMinor,
-      refunded_minor: remainingRefundMinor,
-      settled_at: new Date().toISOString(),
-      receipt_note: receiptAttachmentNote || null,
-    };
+    try {
+      const result = db.recordDeduction(deductionLeaseId, validDeductions, receiptAttachmentNote);
+      const totalNewMinor = result.deductions.reduce((sum, d) => sum + d.amount_minor, 0);
 
-    db.updateItem<Deposit>('deposits', deposit.id, {
-      deductions_json: JSON.stringify(payload),
-      returned_minor: remainingRefundMinor,
-      status: nextStatus,
-    });
-
-    db.recordAudit('SETTLE_DEPOSIT_LEDGER', 'deposits', deposit.id, null, payload);
-
-    setDeposits(db.getTable<Deposit>('deposits'));
-    setIsDeductionModalOpen(false);
-    showToast({
-      type: 'success',
-      message: `Security deposit settled: ${formatMoney(totalDeductedMinor, pack)} deducted, ${formatMoney(remainingRefundMinor, pack)} refunded`,
-    });
+      setDeposits(db.getTable<Deposit>('deposits'));
+      setDepositDeductions(db.getTable<DepositDeduction>('deposit_deductions'));
+      setIsDeductionModalOpen(false);
+      showToast({
+        type: 'success',
+        message: `Recorded ${formatMoney(totalNewMinor, pack)} deduction. Remaining deposit balance: ${formatMoney(result.remainingBalanceMinor, pack)}`,
+      });
+    } catch (err: any) {
+      console.error('[Deposit Deduction Error]:', err);
+      showToast({
+        type: 'error',
+        message: err?.message || 'Failed to record security deposit deduction.',
+      });
+    }
   };
 
   return (
@@ -410,22 +493,11 @@ export const LeasesView: React.FC = () => {
             const tenant = tenants.find((t) => t.id === lease.tenant_id);
             const unit = units.find((u) => u.id === lease.unit_id);
             const property = properties.find((p) => p.id === unit?.property_id);
-            const deposit = deposits.find((d) => d.lease_id === lease.id);
             const humanName = formatLeaseName(tenant?.name, unit?.name, lease.id);
-
-            const deductionList: { amount_minor: number; reason: string; date: string }[] =
-              deposit?.deductions_json ? JSON.parse(deposit.deductions_json) : [];
-            const totalDeductionsMinor = deductionList.reduce((acc, item) => acc + item.amount_minor, 0);
-            const netDepositHeldMinor = Math.max(0, (deposit?.amount_minor || 0) - totalDeductionsMinor);
-
-            const accruedInterest = deposit
-              ? accrueDepositInterest({
-                  principalMinor: netDepositHeldMinor,
-                  pack,
-                  from: deposit.received_at,
-                  to: new Date(),
-                })
-              : 0;
+            const ledger = getDepositLedgerForLease(lease);
+            const totalDeductionsMinor = ledger.totalDeductionsMinor;
+            const netDepositHeldMinor = ledger.remainingBalanceMinor;
+            const accruedInterest = ledger.accruedInterestMinor;
 
             const statusVariant =
               lease.status === 'active'
@@ -473,8 +545,18 @@ export const LeasesView: React.FC = () => {
                       {isMenuOpen && (
                         <div
                           onClick={(e) => e.stopPropagation()}
-                          className="absolute right-0 mt-1 w-44 rounded-xl bg-[var(--bg-surface)] border border-[var(--border-strong)] modal-shadow py-1.5 z-30 animate-in fade-in zoom-in-95 duration-150"
+                          className="absolute right-0 mt-1 w-48 rounded-xl bg-[var(--bg-surface)] border border-[var(--border-strong)] modal-shadow py-1.5 z-30 animate-in fade-in zoom-in-95 duration-150"
                         >
+                          <button
+                            onClick={() => {
+                              setActiveMenuId(null);
+                              setDetailsLeaseId(lease.id);
+                            }}
+                            className="w-full px-3.5 py-2 text-left text-xs text-[var(--text-primary)] hover:bg-[var(--bg-base)] flex items-center gap-2 cursor-pointer"
+                          >
+                            <Eye className="w-3.5 h-3.5 text-[var(--accent)]" />
+                            <span>Lease Details & Ledger</span>
+                          </button>
                           <button
                             onClick={() => {
                               setActiveMenuId(null);
@@ -498,8 +580,7 @@ export const LeasesView: React.FC = () => {
                           <button
                             onClick={() => {
                               setActiveMenuId(null);
-                              setDeductionLeaseId(lease.id);
-                              setIsDeductionModalOpen(true);
+                              handleOpenDeductionModal(lease.id);
                             }}
                             className="w-full px-3.5 py-2 text-left text-xs text-[var(--text-primary)] hover:bg-[var(--bg-base)] flex items-center gap-2 cursor-pointer"
                           >
@@ -544,7 +625,7 @@ export const LeasesView: React.FC = () => {
                       </span>
                     </div>
 
-                    <div className="space-y-1">
+                    <div className="space-y-1 min-w-0">
                       <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-subtle)] block">
                         Security Deposit
                       </span>
@@ -552,20 +633,64 @@ export const LeasesView: React.FC = () => {
                         {formatMoney(netDepositHeldMinor, pack)}
                       </div>
                       <span className="text-[11px] text-[var(--text-secondary)] block truncate">
-                        {accruedInterest > 0
+                        {totalDeductionsMinor > 0
+                          ? `-${formatMoney(totalDeductionsMinor, pack)} deducted`
+                          : accruedInterest > 0
                           ? `+${formatMoney(accruedInterest, pack)} int.`
                           : 'Held in Escrow'}
                       </span>
                     </div>
                   </div>
+
+                  {/* Deduction History Preview inside Card */}
+                  {ledger.historyItems.length > 0 && (
+                      <div className="mb-3 p-2.5 rounded-xl bg-[var(--bg-base)] border border-[var(--border-subtle)] space-y-1.5 min-w-0">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--text-secondary)]">
+                            Deduction History ({ledger.historyItems.length})
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setDetailsLeaseId(lease.id)}
+                            className="text-[11px] font-semibold text-[var(--accent)] hover:underline cursor-pointer"
+                          >
+                            View Full Ledger
+                          </button>
+                        </div>
+                        <div className="divide-y divide-[var(--border-subtle)]">
+                          {ledger.historyItems.slice(0, 2).map((item) => (
+                            <div
+                              key={item.id}
+                              className="py-1 flex items-center justify-between gap-2 text-[11px] min-w-0"
+                            >
+                              <div className="min-w-0 flex-1">
+                                <span className="text-[var(--text-primary)] font-medium truncate block">
+                                  {item.reason}
+                                </span>
+                                <span className="text-[10px] text-[var(--text-subtle)]">{item.date}</span>
+                              </div>
+                              <span className="font-mono font-semibold text-rose-600 shrink-0">
+                                -{formatMoney(item.amountMinor, pack)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                  )}
                 </div>
 
                 {/* Footer Info */}
-                <div className="pt-3 border-t border-[var(--border-subtle)] flex items-center justify-between text-[11px] text-[var(--text-secondary)]">
-                  <span>Tenant: <strong className="text-[var(--text-primary)]">{tenant?.name}</strong></span>
-                  <span className="font-mono text-[10px] text-[var(--text-subtle)]">
-                    {lease.country_code_snapshot} v{lease.pack_version_snapshot}
+                <div className="pt-3 border-t border-[var(--border-subtle)] flex items-center justify-between gap-2 text-[11px] text-[var(--text-secondary)]">
+                  <span className="truncate">
+                    Tenant: <strong className="text-[var(--text-primary)]">{tenant?.name}</strong>
                   </span>
+                  <button
+                    type="button"
+                    onClick={() => setDetailsLeaseId(lease.id)}
+                    className="font-semibold text-[var(--accent)] hover:underline shrink-0 cursor-pointer"
+                  >
+                    Lease Details &rarr;
+                  </button>
                 </div>
               </Card>
             );
@@ -592,7 +717,6 @@ export const LeasesView: React.FC = () => {
                   const tenant = tenants.find((t) => t.id === lease.tenant_id);
                   const unit = units.find((u) => u.id === lease.unit_id);
                   const property = properties.find((p) => p.id === unit?.property_id);
-                  const deposit = deposits.find((d) => d.lease_id === lease.id);
 
                   const statusVariant =
                     lease.status === 'active'
@@ -622,7 +746,21 @@ export const LeasesView: React.FC = () => {
                         {formatMoney(lease.rent_minor, pack)}
                       </td>
                       <td className="py-3 px-6 text-right font-medium number-tabular text-[var(--text-secondary)]">
-                        {formatMoney(deposit?.amount_minor || lease.deposit_minor, pack)}
+                        {(() => {
+                          const ledger = getDepositLedgerForLease(lease);
+                          return (
+                            <div>
+                              <div className="text-[var(--text-primary)] font-semibold">
+                                {formatMoney(ledger.remainingBalanceMinor, pack)}
+                              </div>
+                              {ledger.totalDeductionsMinor > 0 && (
+                                <div className="text-[10px] text-rose-600 font-mono">
+                                  -{formatMoney(ledger.totalDeductionsMinor, pack)} deducted
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td className="py-3 px-6 text-center">
                         <Badge variant={statusVariant}>{lease.status.toUpperCase()}</Badge>
@@ -630,11 +768,25 @@ export const LeasesView: React.FC = () => {
                       <td className="py-3 px-6 text-right">
                         <div className="flex items-center justify-end gap-1.5">
                           <button
+                            onClick={() => setDetailsLeaseId(lease.id)}
+                            className="p-1.5 rounded-lg text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors cursor-pointer"
+                            title="Lease Details & Deduction History"
+                          >
+                            <Eye className="w-4 h-4" />
+                          </button>
+                          <button
                             onClick={() => setChecklistLease(lease)}
                             className="p-1.5 rounded-lg text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/30 transition-colors cursor-pointer"
                             title="Move-In / Move-Out Inspection Checklist"
                           >
                             <FileCheck className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => handleOpenDeductionModal(lease.id)}
+                            className="p-1.5 rounded-lg text-[var(--text-secondary)] hover:text-[var(--accent)] hover:bg-[var(--bg-surface-sunken)] transition-colors cursor-pointer"
+                            title="Record Security Deposit Deduction"
+                          >
+                            <Wallet className="w-4 h-4" />
                           </button>
                           <button
                             onClick={() => handleOpenEdit(lease)}
@@ -683,14 +835,18 @@ export const LeasesView: React.FC = () => {
                 onChange={(e) => handleUnitChange(e.target.value)}
                 required
               >
-                {validUnits.map((u) => {
-                  const prop = properties.find((p) => p.id === u.property_id);
-                  return (
-                    <option key={u.id} value={u.id}>
-                      {prop?.name} &bull; {u.name} ({formatMoney(u.rent_minor, pack)}/mo)
-                    </option>
-                  );
-                })}
+                {selectableUnits.length === 0 ? (
+                  <option value="">No vacant units available</option>
+                ) : (
+                  selectableUnits.map((u) => {
+                    const prop = properties.find((p) => p.id === u.property_id);
+                    return (
+                      <option key={u.id} value={u.id}>
+                        {prop?.name} &bull; {u.name} ({formatMoney(u.rent_minor, pack)}/mo)
+                      </option>
+                    );
+                  })
+                )}
               </Select>
 
               <Select
@@ -832,91 +988,122 @@ export const LeasesView: React.FC = () => {
         maxWidth="lg"
       >
         {(() => {
+          const targetLease = leases.find((l) => l.id === deductionLeaseId);
           const deposit = deposits.find((d) => d.lease_id === deductionLeaseId);
-          const activeDepositMinor = deposit?.amount_minor || 0;
-          const totalDeductionsMinor = deductionItems.reduce(
+          const originalDepositMinor = deposit?.amount_minor ?? targetLease?.deposit_minor ?? 0;
+
+          const existingLedgerRows = deposit
+            ? depositDeductions.filter((dd) => dd.deposit_id === deposit.id && !dd.deleted_at)
+            : [];
+          const existingJsonRows = parseDepositDeductions(deposit?.deductions_json);
+          const alreadyDeductedMinor =
+            existingLedgerRows.length > 0
+              ? existingLedgerRows.reduce((sum, item) => sum + (Number(item.amount_minor) || 0), 0)
+              : existingJsonRows.reduce((sum, item) => sum + (Number(item.amount_minor) || 0), 0);
+
+          const remainingBeforeMinor = Math.max(0, originalDepositMinor - alreadyDeductedMinor);
+          const newDeductionsMinor = deductionItems.reduce(
             (sum, item) => sum + Math.round((parseFloat(item.amount) || 0) * 100),
             0
           );
-          const remainingRefundMinor = Math.max(0, activeDepositMinor - totalDeductionsMinor);
+          const exceedsBalance = newDeductionsMinor > remainingBeforeMinor;
+          const remainingAfterMinor = Math.max(0, remainingBeforeMinor - newDeductionsMinor);
 
           return (
-            <form onSubmit={handleRecordDeduction} className="space-y-4">
+            <form onSubmit={handleRecordDeduction} className="w-full max-w-full min-w-0 space-y-4">
               {/* Escrow Balance Card */}
-              <div className="grid grid-cols-3 gap-3 p-3.5 rounded-xl bg-[var(--bg-base)] border border-[var(--border-subtle)] text-center">
-                <div>
-                  <span className="text-[10px] uppercase font-bold text-[var(--text-secondary)]">Escrow Deposit</span>
-                  <p className="text-base font-bold font-mono text-[var(--text-primary)]">
-                    {formatMoney(activeDepositMinor, pack)}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3.5 rounded-xl bg-[var(--bg-base)] border border-[var(--border-subtle)] text-center min-w-0">
+                <div className="min-w-0">
+                  <span className="text-[10px] uppercase font-bold text-[var(--text-secondary)] block truncate">
+                    Remaining Deposit
+                  </span>
+                  <p className="text-sm sm:text-base font-bold font-mono text-[var(--text-primary)] break-words">
+                    {formatMoney(remainingBeforeMinor, pack)}
                   </p>
                 </div>
-                <div>
-                  <span className="text-[10px] uppercase font-bold text-rose-600">Total Deductions</span>
-                  <p className="text-base font-bold font-mono text-rose-600">
-                    -{formatMoney(totalDeductionsMinor, pack)}
+                <div className="min-w-0">
+                  <span className="text-[10px] uppercase font-bold text-rose-600 block truncate">
+                    New Deductions
+                  </span>
+                  <p className="text-sm sm:text-base font-bold font-mono text-rose-600 break-words">
+                    -{formatMoney(newDeductionsMinor, pack)}
                   </p>
                 </div>
-                <div>
-                  <span className="text-[10px] uppercase font-bold text-emerald-600">Net Tenant Refund</span>
-                  <p className="text-base font-bold font-mono text-emerald-600">
-                    {formatMoney(remainingRefundMinor, pack)}
+                <div className="min-w-0">
+                  <span className="text-[10px] uppercase font-bold text-emerald-600 block truncate">
+                    Net Balance After
+                  </span>
+                  <p className="text-sm sm:text-base font-bold font-mono text-emerald-600 break-words">
+                    {formatMoney(remainingAfterMinor, pack)}
                   </p>
                 </div>
               </div>
 
+              {exceedsBalance && (
+                <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-600 dark:text-rose-400 flex items-start gap-2 min-w-0">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span className="min-w-0 break-words">
+                    Deduction total ({formatMoney(newDeductionsMinor, pack)}) cannot exceed the remaining deposit balance ({formatMoney(remainingBeforeMinor, pack)}).
+                  </span>
+                </div>
+              )}
+
               {/* Deduction Line Items */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-bold text-[var(--text-primary)] uppercase tracking-wider">
+              <div className="space-y-2 min-w-0">
+                <div className="flex items-center justify-between gap-2 min-w-0">
+                  <label className="text-xs font-bold text-[var(--text-primary)] uppercase tracking-wider truncate">
                     Itemized Deductions
                   </label>
                   <button
                     type="button"
                     onClick={handleAddDeductionRow}
-                    className="text-xs text-[var(--accent)] hover:underline font-medium cursor-pointer"
+                    className="text-xs text-[var(--accent)] hover:underline font-medium cursor-pointer shrink-0"
                   >
                     + Add Deduction Line
                   </button>
                 </div>
 
-                <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                <div className="space-y-2 max-h-56 overflow-y-auto pr-1 min-w-0">
                   {deductionItems.map((item, idx) => (
-                    <div key={item.id} className="flex items-center gap-2">
+                    <div key={item.id} className="flex flex-col sm:flex-row sm:items-center gap-2 min-w-0 w-full">
                       <input
                         type="text"
                         value={item.reason}
                         onChange={(e) => handleUpdateDeductionRow(item.id, 'reason', e.target.value)}
                         placeholder={`Reason #${idx + 1} (e.g. wall patching, lost key replacement)`}
-                        className="flex-1 h-9 px-3 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] text-xs text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                        className="w-full max-w-full flex-1 min-w-0 h-9 px-3 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] text-xs text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                         required
                       />
-                      <div className="w-28 relative">
-                        <input
-                          type="number"
-                          step="any"
-                          value={item.amount}
-                          onChange={(e) => handleUpdateDeductionRow(item.id, 'amount', e.target.value)}
-                          placeholder="Amount"
-                          className="w-full h-9 px-3 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] text-xs text-[var(--text-primary)] font-mono text-right focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
-                          required
-                        />
+                      <div className="flex items-center gap-2 w-full sm:w-auto shrink-0 min-w-0">
+                        <div className="w-full sm:w-28 min-w-0 relative">
+                          <input
+                            type="number"
+                            step="any"
+                            min="0.01"
+                            value={item.amount}
+                            onChange={(e) => handleUpdateDeductionRow(item.id, 'amount', e.target.value)}
+                            placeholder="Amount"
+                            className="w-full max-w-full h-9 px-3 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] text-xs text-[var(--text-primary)] font-mono text-right focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                            required
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveDeductionRow(item.id)}
+                          disabled={deductionItems.length <= 1}
+                          className="w-8 h-8 shrink-0 rounded-lg flex items-center justify-center text-[var(--text-subtle)] hover:text-rose-600 hover:bg-rose-50 disabled:opacity-40 cursor-pointer"
+                          title="Remove row"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveDeductionRow(item.id)}
-                        disabled={deductionItems.length <= 1}
-                        className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--text-subtle)] hover:text-rose-600 hover:bg-rose-50 disabled:opacity-40 cursor-pointer"
-                        title="Remove row"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
                     </div>
                   ))}
                 </div>
               </div>
 
               {/* Attachment Notes */}
-              <div>
+              <div className="min-w-0">
                 <label className="block text-xs font-medium text-[var(--text-secondary)] mb-1">
                   Receipts & Evidence Notes
                 </label>
@@ -925,27 +1112,223 @@ export const LeasesView: React.FC = () => {
                   value={receiptAttachmentNote}
                   onChange={(e) => setReceiptAttachmentNote(e.target.value)}
                   placeholder="Receipts attached from Handyman Invoice #2041, photos saved in Document Vault..."
-                  className="w-full p-2.5 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] text-xs text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                  className="w-full max-w-full min-w-0 p-2.5 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] text-xs text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                 />
               </div>
 
-              <div className="flex items-center justify-between pt-3 border-t border-[var(--border-subtle)]">
-                <span className="text-xs text-[var(--text-secondary)]">
-                  Remaining balance of <strong>{formatMoney(remainingRefundMinor, pack)}</strong> will be marked returned.
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-[var(--border-subtle)] min-w-0">
+                <span className="text-xs text-[var(--text-secondary)] min-w-0 break-words">
+                  Remaining balance of <strong>{formatMoney(remainingAfterMinor, pack)}</strong> will remain refundable.
                 </span>
-                <div className="flex gap-2">
+                <div className="flex items-center justify-end gap-2 shrink-0">
                   <Button type="button" variant="outline" onClick={() => setIsDeductionModalOpen(false)}>
                     Cancel
                   </Button>
-                  <Button type="submit" variant="primary">
-                    Settle & Refund Balance
+                  <Button type="submit" variant="primary" disabled={exceedsBalance || remainingBeforeMinor <= 0}>
+                    Record Deduction
                   </Button>
                 </div>
               </div>
+
+              {/* Existing Deduction History inside Record Deduction Modal */}
+              {targetLease && (() => {
+                const ledger = getDepositLedgerForLease(targetLease);
+                if (ledger.historyItems.length === 0) return null;
+                return (
+                  <div className="pt-3 border-t border-[var(--border-subtle)] space-y-2 min-w-0">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-[var(--text-secondary)]">
+                      Previous Deduction History
+                    </h4>
+                    <div className="rounded-xl border border-[var(--border-subtle)] overflow-x-auto max-h-36">
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead className="bg-[var(--bg-base)] border-b border-[var(--border-subtle)] text-[var(--text-secondary)]">
+                          <tr>
+                            <th className="py-2 px-3 font-semibold">Date</th>
+                            <th className="py-2 px-3 font-semibold">Reason / Notes</th>
+                            <th className="py-2 px-3 font-semibold text-right">Amount Deducted</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[var(--border-subtle)]">
+                          {ledger.historyItems.map((h) => (
+                            <tr key={h.id}>
+                              <td className="py-2 px-3 whitespace-nowrap text-[var(--text-secondary)]">{h.date}</td>
+                              <td className="py-2 px-3 min-w-0 break-words text-[var(--text-primary)]">
+                                <div>{h.reason}</div>
+                                {h.notes && <div className="text-[11px] text-[var(--text-subtle)]">{h.notes}</div>}
+                              </td>
+                              <td className="py-2 px-3 whitespace-nowrap text-right font-mono font-semibold text-rose-600">
+                                -{formatMoney(h.amountMinor, pack)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })()}
             </form>
           );
         })()}
       </Modal>
+
+      {/* Lease Details & Security Deposit Deduction History Ledger Modal */}
+      <Modal
+        isOpen={!!detailsLeaseId}
+        onClose={() => setDetailsLeaseId(null)}
+        title="Lease Details & Security Deposit Ledger"
+        description="Complete tenancy summary, escrow balance, and running deposit deduction history."
+        maxWidth="2xl"
+      >
+        {(() => {
+          const lease = leases.find((l) => l.id === detailsLeaseId);
+          if (!lease) return null;
+          const tenant = tenants.find((t) => t.id === lease.tenant_id);
+          const unit = units.find((u) => u.id === lease.unit_id);
+          const property = properties.find((p) => p.id === unit?.property_id);
+          const ledger = getDepositLedgerForLease(lease);
+
+          return (
+            <div className="space-y-6 min-w-0 w-full max-w-full">
+              {/* Lease Overview */}
+              <div className="p-4 rounded-xl bg-[var(--bg-base)] border border-[var(--border-subtle)] grid grid-cols-1 sm:grid-cols-2 gap-4 min-w-0">
+                <div className="min-w-0">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--text-subtle)] block">
+                    Tenant &amp; Unit
+                  </span>
+                  <div className="text-sm font-bold text-[var(--text-primary)] truncate mt-0.5">
+                    {tenant?.name || 'Unnamed Tenant'}
+                  </div>
+                  <div className="text-xs text-[var(--text-secondary)] truncate">
+                    {property?.name} &bull; {unit?.name}
+                  </div>
+                </div>
+                <div className="min-w-0 sm:text-right">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--text-subtle)] block">
+                    Term &amp; Monthly Rent
+                  </span>
+                  <div className="text-sm font-bold text-[var(--text-primary)] font-mono mt-0.5">
+                    {formatMoney(lease.rent_minor, pack)} / {lease.billing_cycle}
+                  </div>
+                  <div className="text-xs text-[var(--text-secondary)] font-mono">
+                    {lease.start_date} to {lease.end_date}
+                  </div>
+                </div>
+              </div>
+
+              {/* Security Deposit Section */}
+              <div className="space-y-4 min-w-0">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-bold text-[var(--text-primary)] flex items-center gap-2">
+                      <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                      <span>Security Deposit</span>
+                    </h3>
+                    <p className="text-xs text-[var(--text-secondary)]">
+                      Escrow balance and itemized deduction ledger
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="primary"
+                    className="gap-1.5"
+                    onClick={() => handleOpenDeductionModal(lease.id)}
+                  >
+                    <Wallet className="w-3.5 h-3.5" />
+                    <span>Record Deduction</span>
+                  </Button>
+                </div>
+
+                {/* Deposit Balance Summary */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3.5 rounded-xl bg-[var(--bg-base)] border border-[var(--border-subtle)] text-center min-w-0">
+                  <div className="min-w-0">
+                    <span className="text-[10px] uppercase font-bold text-[var(--text-secondary)] block truncate">
+                      Original Deposit
+                    </span>
+                    <p className="text-sm sm:text-base font-bold font-mono text-[var(--text-primary)] break-words">
+                      {formatMoney(ledger.originalDepositMinor, pack)}
+                    </p>
+                  </div>
+                  <div className="min-w-0">
+                    <span className="text-[10px] uppercase font-bold text-rose-600 block truncate">
+                      Total Deducted
+                    </span>
+                    <p className="text-sm sm:text-base font-bold font-mono text-rose-600 break-words">
+                      -{formatMoney(ledger.totalDeductionsMinor, pack)}
+                    </p>
+                  </div>
+                  <div className="min-w-0">
+                    <span className="text-[10px] uppercase font-bold text-emerald-600 block truncate">
+                      Remaining Balance
+                    </span>
+                    <p className="text-sm sm:text-base font-bold font-mono text-emerald-600 break-words">
+                      {formatMoney(ledger.remainingBalanceMinor, pack)}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Deduction History Table */}
+                <div className="space-y-2 min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-[var(--text-primary)]">
+                      Deduction History
+                    </h4>
+                    <span className="text-[11px] text-[var(--text-secondary)]">
+                      {ledger.historyItems.length} record{ledger.historyItems.length === 1 ? '' : 's'}
+                    </span>
+                  </div>
+
+                  {ledger.historyItems.length === 0 ? (
+                    <div className="p-6 rounded-xl border border-dashed border-[var(--border-strong)] text-center text-xs text-[var(--text-secondary)]">
+                      No deductions recorded for this tenant&apos;s security deposit yet.
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-[var(--border-subtle)] overflow-x-auto bg-[var(--bg-surface)]">
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead>
+                          <tr className="bg-[var(--bg-base)] border-b border-[var(--border-subtle)] text-[var(--text-secondary)] uppercase tracking-wider">
+                            <th className="py-2.5 px-4 font-semibold">Date</th>
+                            <th className="py-2.5 px-4 font-semibold">Reason / Notes</th>
+                            <th className="py-2.5 px-4 font-semibold text-right">Amount Deducted</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[var(--border-subtle)]">
+                          {ledger.historyItems.map((row) => (
+                            <tr key={row.id} className="hover:bg-[var(--bg-base)]/60">
+                              <td className="py-2.5 px-4 whitespace-nowrap font-mono text-[var(--text-secondary)]">
+                                {row.date}
+                              </td>
+                              <td className="py-2.5 px-4 min-w-0 break-words text-[var(--text-primary)]">
+                                <div className="font-medium">{row.reason}</div>
+                                {row.notes && (
+                                  <div className="text-[11px] text-[var(--text-subtle)] mt-0.5">
+                                    {row.notes}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-4 whitespace-nowrap text-right font-mono font-bold text-rose-600">
+                                -{formatMoney(row.amountMinor, pack)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-3 border-t border-[var(--border-subtle)]">
+                <Button type="button" variant="outline" onClick={() => setDetailsLeaseId(null)}>
+                  Close
+                </Button>
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
+
       {/* Move-In / Move-Out Inspection Checklist Modal */}
       <LeaseChecklistModal
         isOpen={!!checklistLease}

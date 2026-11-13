@@ -13,6 +13,7 @@ import {
   Payment,
   Credit,
   Deposit,
+  DepositDeduction,
   MaintenanceRequest,
   DocumentVaultItem,
   TenantContactLog,
@@ -38,6 +39,7 @@ export const ALL_DB_TABLES = [
   'payments',
   'credits',
   'deposits',
+  'deposit_deductions',
   'maintenance_requests',
   'documents',
   'tenant_contact_logs',
@@ -65,6 +67,7 @@ export class RentFlowDexieDatabase extends Dexie {
   payments!: Table<Payment, string>;
   credits!: Table<Credit, string>;
   deposits!: Table<Deposit, string>;
+  deposit_deductions!: Table<DepositDeduction, string>;
   maintenance_requests!: Table<MaintenanceRequest, string>;
   documents!: Table<DocumentVaultItem, string>;
   tenant_contact_logs!: Table<TenantContactLog, string>;
@@ -78,7 +81,7 @@ export class RentFlowDexieDatabase extends Dexie {
   constructor(dbName = 'RentFlowDB') {
     super(dbName);
 
-    this.version(1).stores({
+    const storesV1 = {
       organizations: 'id, country_code, updated_at, deleted_at',
       users: 'id, org_id, email, role, status, updated_at, deleted_at',
       workspaces: 'id, org_id, storage_model, updated_at, deleted_at',
@@ -106,6 +109,12 @@ export class RentFlowDexieDatabase extends Dexie {
       utility_bills: 'id, property_id, utility_type, bill_period, updated_at, deleted_at',
       audit_log: 'id, org_id, entity_type, entity_id, created_at',
       sync_queue: '++id, table_name, record_id, synced, created_at',
+    };
+
+    this.version(1).stores(storesV1);
+    this.version(2).stores({
+      ...storesV1,
+      deposit_deductions: 'id, deposit_id, lease_id, created_at, updated_at, deleted_at',
     });
   }
 }

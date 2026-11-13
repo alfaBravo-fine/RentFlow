@@ -11,12 +11,12 @@ export const handlePrint = (callback?: () => void): void => {
     }
   }
 
-  // Exact 100ms delay to guarantee DOM reflow and print-area readiness
+  // 200ms delay to guarantee DOM reflow and print-area readiness
   window.setTimeout(() => {
     try {
       window.print();
     } catch (err) {
       console.error('[Print Engine] window.print() invocation failed:', err);
     }
-  }, 100);
+  }, 200);
 };

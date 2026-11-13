@@ -215,6 +215,21 @@ export interface Deposit {
   deleted_at?: number | null;
 }
 
+export interface DepositDeduction {
+  id: string;
+  deposit_id: string;
+  lease_id: string;
+  amount_minor: number;
+  currency_code: string;
+  reason: string;
+  receipt_note?: string | null;
+  deducted_at: string;
+  created_at: number;
+  updated_at: number;
+  device_id: string;
+  deleted_at?: number | null;
+}
+
 export interface MaintenanceRequest {
   id: string;
   unit_id: string;

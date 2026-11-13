@@ -26,10 +26,35 @@ import {
   Invoice,
   Payment,
   Credit,
+  Deposit,
+  DepositDeduction,
   MaintenanceRequest,
   AuditLog,
   SyncQueueItem,
 } from './schema';
+
+export interface ParsedDeductionItem {
+  id: string;
+  reason: string;
+  amount_minor: number;
+  date: string;
+}
+
+export function parseDepositDeductions(raw: unknown): ParsedDeductionItem[] {
+  if (!raw) return [];
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (Array.isArray(parsed)) {
+      return parsed;
+    }
+    if (parsed && typeof parsed === 'object' && Array.isArray((parsed as any).deductions)) {
+      return (parsed as any).deductions;
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
 
 function normalizeRecord<T extends Record<string, any>>(row: T): T {
   if (!row || typeof row !== 'object') return row;
@@ -434,6 +459,9 @@ export class DBClient {
       void this.enqueueDexieWork(async () => {
         await this.dexieInstance.units.put(updated);
       }).catch(() => {});
+      if (isTauri()) {
+        tauriDbUpdateItem('units', u.id, updated).catch(() => {});
+      }
     };
 
     if (targetUnitId) {
@@ -1380,6 +1408,229 @@ export class DBClient {
       plan.rollback();
       throw err;
     }
+  }
+
+  /**
+   * Validates and records security deposit deductions against a lease deposit.
+   * Ensures deduction does not exceed remaining deposit balance, updates the `deposits`
+   * table, and logs itemized rows in `deposit_deductions` atomically.
+   */
+  public recordDeduction(
+    leaseId: string,
+    items: Array<{ id?: string; reason: string; amountMinor: number }>,
+    receiptNote?: string | null
+  ): { deposit: Deposit; deductions: DepositDeduction[]; remainingBalanceMinor: number } {
+    const now = Date.now();
+    const nowIso = new Date(now).toISOString();
+
+    const prevDeposits = [...this.getMemoryTable<Deposit>('deposits')];
+    const prevDeductions = [...this.getMemoryTable<DepositDeduction>('deposit_deductions')];
+    const prevAudit = [...this.getMemoryTable<AuditLog>('audit_log')];
+    const prevSync = [...this.getMemoryTable<SyncQueueItem>('sync_queue')];
+
+    let deposit = prevDeposits.find(
+      (d) => d.lease_id === leaseId && !d.deleted_at && !(d as any).deletedAt
+    );
+    let isNewDepositRecord = false;
+
+    if (!deposit) {
+      const lease = this.getItem<Lease>('leases', leaseId);
+      if (!lease || !lease.deposit_minor || lease.deposit_minor <= 0) {
+        throw new Error('No security deposit found for this lease.');
+      }
+      deposit = {
+        id: generateUUID(),
+        lease_id: leaseId,
+        amount_minor: lease.deposit_minor,
+        currency_code: lease.currency_code || 'USD',
+        received_at: lease.start_date || nowIso.split('T')[0],
+        status: 'held',
+        interest_accrued_minor: 0,
+        returned_minor: 0,
+        deductions_json: null,
+        updated_at: now,
+        device_id: this.deviceId,
+        deleted_at: null,
+      };
+      isNewDepositRecord = true;
+    }
+
+    const existingLedgerRows = prevDeductions.filter(
+      (d) => d.deposit_id === deposit!.id && !d.deleted_at && !(d as any).deletedAt
+    );
+    const parsedJsonRows = parseDepositDeductions(deposit.deductions_json);
+
+    const existingDeductedMinor =
+      existingLedgerRows.length > 0
+        ? existingLedgerRows.reduce((sum, d) => sum + (Number(d.amount_minor) || 0), 0)
+        : parsedJsonRows.reduce((sum, d) => sum + (Number(d.amount_minor) || 0), 0);
+
+    const remainingBeforeMinor = Math.max(0, (Number(deposit.amount_minor) || 0) - existingDeductedMinor);
+    if (remainingBeforeMinor <= 0) {
+      throw new Error('The security deposit balance has already been fully deducted.');
+    }
+
+    const validItems = (items || [])
+      .map((item) => ({
+        id: item.id || generateUUID(),
+        reason: String(item.reason || '').trim(),
+        amountMinor: Math.round(Number(item.amountMinor) || 0),
+      }))
+      .filter((item) => item.reason.length > 0 && item.amountMinor > 0);
+
+    if (validItems.length === 0) {
+      throw new Error('Please provide at least one deduction item with a reason and positive amount.');
+    }
+
+    const newDeductionsTotalMinor = validItems.reduce((sum, item) => sum + item.amountMinor, 0);
+    if (newDeductionsTotalMinor > remainingBeforeMinor) {
+      throw new Error(
+        `Deduction amount (${(newDeductionsTotalMinor / 100).toFixed(2)}) exceeds the remaining deposit balance (${(remainingBeforeMinor / 100).toFixed(2)}).`
+      );
+    }
+
+    const newDeductionRecords: DepositDeduction[] = validItems.map((item) => ({
+      id: generateUUID(),
+      deposit_id: deposit!.id,
+      lease_id: leaseId,
+      amount_minor: item.amountMinor,
+      currency_code: deposit!.currency_code || 'USD',
+      reason: item.reason,
+      receipt_note: receiptNote?.trim() || null,
+      deducted_at: nowIso,
+      created_at: now,
+      updated_at: now,
+      device_id: this.deviceId,
+      deleted_at: null,
+    }));
+
+    const totalDeductedAfterMinor = existingDeductedMinor + newDeductionsTotalMinor;
+    const remainingAfterMinor = Math.max(0, (Number(deposit.amount_minor) || 0) - totalDeductedAfterMinor);
+
+    const combinedJsonItems: ParsedDeductionItem[] = [
+      ...parsedJsonRows,
+      ...newDeductionRecords.map((rec) => ({
+        id: rec.id,
+        reason: rec.reason,
+        amount_minor: rec.amount_minor,
+        date: rec.deducted_at,
+      })),
+    ];
+
+    const nextStatus: Deposit['status'] =
+      remainingAfterMinor === 0
+        ? 'forfeited'
+        : totalDeductedAfterMinor > 0
+        ? 'partially_returned'
+        : 'returned';
+
+    const ledgerPayload = {
+      deductions: combinedJsonItems,
+      total_deductions_minor: totalDeductedAfterMinor,
+      refunded_minor: remainingAfterMinor,
+      settled_at: nowIso,
+      receipt_note: receiptNote?.trim() || null,
+    };
+
+    const updatedDeposit: Deposit = {
+      ...deposit,
+      deductions_json: JSON.stringify(ledgerPayload),
+      returned_minor: remainingAfterMinor,
+      status: nextStatus,
+      updated_at: now,
+      device_id: this.deviceId,
+    };
+
+    const nextDeposits = isNewDepositRecord
+      ? [updatedDeposit, ...prevDeposits]
+      : prevDeposits.map((d) => (d.id === updatedDeposit.id ? updatedDeposit : d));
+    const nextDeductions = [...newDeductionRecords, ...prevDeductions];
+
+    const auditEntry = this.buildAuditEntry(
+      'RECORD_DEPOSIT_DEDUCTION',
+      'deposits',
+      updatedDeposit.id,
+      isNewDepositRecord ? null : deposit,
+      ledgerPayload
+    );
+    const syncDeposit = this.buildSyncItem(
+      'deposits',
+      updatedDeposit.id,
+      isNewDepositRecord ? 'insert' : 'update',
+      updatedDeposit
+    );
+    const syncDeductions = newDeductionRecords.map((rec) =>
+      this.buildSyncItem('deposit_deductions', rec.id, 'insert', rec)
+    );
+
+    const nextAudit = [auditEntry, ...prevAudit];
+    const nextSync = [...syncDeductions, syncDeposit, ...prevSync];
+
+    const rollback = () => {
+      this.setMemoryTable('deposits', prevDeposits);
+      this.setMemoryTable('deposit_deductions', prevDeductions);
+      this.setMemoryTable('audit_log', prevAudit);
+      this.setMemoryTable('sync_queue', prevSync);
+      this.notifyWrite();
+    };
+
+    this.setMemoryTable('deposits', nextDeposits);
+    this.setMemoryTable('deposit_deductions', nextDeductions);
+    this.setMemoryTable('audit_log', nextAudit);
+    this.setMemoryTable('sync_queue', nextSync);
+    this.notifyWrite();
+
+    void this.enqueueDexieWork(async () => {
+      await this.dexieInstance.transaction(
+        'rw',
+        [
+          this.dexieInstance.deposits,
+          this.dexieInstance.deposit_deductions,
+          this.dexieInstance.audit_log,
+          this.dexieInstance.sync_queue,
+        ],
+        async () => {
+          await this.dexieInstance.deposits.put(updatedDeposit);
+          for (const rec of newDeductionRecords) {
+            await this.dexieInstance.deposit_deductions.put(rec);
+          }
+          await this.dexieInstance.audit_log.put(auditEntry);
+          await this.dexieInstance.sync_queue.put(syncDeposit);
+          for (const s of syncDeductions) {
+            await this.dexieInstance.sync_queue.put(s);
+          }
+        }
+      );
+    }).catch(() => {
+      rollback();
+    });
+
+    if (isTauri()) {
+      if (isNewDepositRecord) {
+        tauriDbInsertItem('deposits', updatedDeposit).catch(() => {});
+      } else {
+        tauriDbUpdateItem('deposits', updatedDeposit.id, updatedDeposit).catch(() => {});
+      }
+      for (const rec of newDeductionRecords) {
+        tauriDbInsertItem('deposit_deductions', rec).catch(() => {});
+      }
+    }
+
+    return {
+      deposit: updatedDeposit,
+      deductions: newDeductionRecords,
+      remainingBalanceMinor: remainingAfterMinor,
+    };
+  }
+
+  public async recordDeductionAsync(
+    leaseId: string,
+    items: Array<{ id?: string; reason: string; amountMinor: number }>,
+    receiptNote?: string | null
+  ): Promise<{ deposit: Deposit; deductions: DepositDeduction[]; remainingBalanceMinor: number }> {
+    const result = this.recordDeduction(leaseId, items, receiptNote);
+    await this.flush();
+    return result;
   }
 
   // --- Bulk Export / Atomic Import ---

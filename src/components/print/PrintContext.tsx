@@ -56,6 +56,7 @@ export function printHtml(htmlString: string, onComplete?: () => void): void {
       window.clearTimeout(fallbackTimer);
     }
     window.removeEventListener('afterprint', cleanup);
+    printRoot.className = 'hidden print:block bg-white text-black';
     clearPrintRoot();
     onComplete?.();
   };
@@ -70,7 +71,7 @@ export function printHtml(htmlString: string, onComplete?: () => void): void {
       console.error('[Print Engine] window.print() failed:', err);
       cleanup();
     }
-  }, 100);
+  }, 200);
 }
 
 export const PrintProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {

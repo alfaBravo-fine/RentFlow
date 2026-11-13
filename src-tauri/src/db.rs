@@ -24,6 +24,7 @@ const ALLOWED_TABLES: &[&str] = &[
     "payments",
     "credits",
     "deposits",
+    "deposit_deductions",
     "maintenance_requests",
     "documents",
     "tenant_contact_logs",
@@ -438,6 +439,21 @@ impl DatabaseManager {
                 interest_accrued_minor INTEGER NOT NULL DEFAULT 0,
                 returned_minor INTEGER NOT NULL DEFAULT 0,
                 deductions_json TEXT,
+                updated_at INTEGER NOT NULL,
+                device_id TEXT NOT NULL,
+                deleted_at INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS deposit_deductions (
+                id TEXT PRIMARY KEY,
+                deposit_id TEXT NOT NULL,
+                lease_id TEXT NOT NULL,
+                amount_minor INTEGER NOT NULL,
+                currency_code TEXT NOT NULL DEFAULT 'USD',
+                reason TEXT NOT NULL,
+                receipt_note TEXT,
+                deducted_at TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 device_id TEXT NOT NULL,
                 deleted_at INTEGER

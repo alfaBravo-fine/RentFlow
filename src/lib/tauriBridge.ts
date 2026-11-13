@@ -1,4 +1,5 @@
 import { encryptWithGoogleId, decryptWithGoogleId, uint8ArrayToBase64, base64ToUint8Array } from './driveCrypto';
+import { GOOGLE_CLIENT_ID } from '../config/google';
 
 export interface UserProfile {
   id: string;
@@ -67,7 +68,7 @@ export async function ensureWebGoogleDriveAppFolder(token: string): Promise<stri
  * Real Google Login execution: Tauri Rust system browser or Web OAuth 2.0 flow
  */
 export async function tauriGoogleLogin(): Promise<UserProfile> {
-  const envClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
+  const envClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || GOOGLE_CLIENT_ID;
   console.log('[RentFlow Auth Debug] import.meta.env.VITE_GOOGLE_CLIENT_ID:', envClientId);
 
   // 1. Desktop Tauri Environment

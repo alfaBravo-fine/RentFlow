@@ -82,6 +82,8 @@ import {
   Lease,
   Invoice,
   Payment,
+  Deposit,
+  DepositDeduction,
   Expense,
   Vendor,
   MaintenanceRequest,
@@ -150,6 +152,11 @@ export interface IDatabaseService {
     method: string,
     reference?: string
   ): Promise<{ payment: Payment; allocatedInvoices: Invoice[] }>;
+  recordDeduction(
+    leaseId: string,
+    items: Array<{ id?: string; reason: string; amountMinor: number }>,
+    receiptNote?: string | null
+  ): Promise<{ deposit: Deposit; deductions: DepositDeduction[]; remainingBalanceMinor: number }>;
 
   // --- Expenses CRUD ---
   getExpenses(): Promise<Expense[]>;
@@ -661,6 +668,14 @@ export class DatabaseService implements IDatabaseService {
     reference?: string
   ): Promise<{ payment: Payment; allocatedInvoices: Invoice[] }> {
     return db.allocatePaymentAsync(leaseId, amountMinor, method, reference);
+  }
+
+  public async recordDeduction(
+    leaseId: string,
+    items: Array<{ id?: string; reason: string; amountMinor: number }>,
+    receiptNote?: string | null
+  ): Promise<{ deposit: Deposit; deductions: DepositDeduction[]; remainingBalanceMinor: number }> {
+    return db.recordDeductionAsync(leaseId, items, receiptNote);
   }
 
   // ==========================================================================

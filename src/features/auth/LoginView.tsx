@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { useGoogleLogin } from '@react-oauth/google';
 import { useAuthStore } from '../../stores/authStore';
 import { Card } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
 import { Badge } from '../../components/ui/Badge';
-import { ShieldCheck, Lock, RefreshCw, AlertCircle, Database, Folder, UserCheck } from '../../components/icons';
+import { ShieldCheck, Lock, RefreshCw, AlertCircle, Database, Folder } from '../../components/icons';
 import { RentFlowLogo } from '../../components/brand/RentFlowLogo';
 import { GOOGLE_CLIENT_ID } from '../../config/google';
 import { isTauri as detectTauri } from '../../lib/tauri/bridge';
@@ -18,15 +19,146 @@ export const LoginView: React.FC = () => {
 
   const [statusText, setStatusText] = useState<string | null>(null);
 
-  // Desktop Native Loopback OAuth Trigger via Rust (tauri-plugin-oauth + oauth2)
+  // Helper to fetch real profile from Google OAuth UserInfo endpoint using access_token
+  const fetchRealGoogleProfile = async (accessToken: string) => {
+    setStatusText('Fetching real Google user profile...');
+    console.log('[Google Auth] Fetching profile with access_token via Google UserInfo API...');
+
+    const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (!res.ok) {
+      throw new Error(`Google UserInfo API returned error status ${res.status}`);
+    }
+
+    const profile = await res.json();
+    console.log('[Google Auth] Real Google User Profile received:', profile);
+
+    if (!profile || !profile.email) {
+      throw new Error('Invalid Google user profile data received from Google.');
+    }
+
+    setGoogleSession(
+      {
+        sub: profile.sub,
+        email: profile.email,
+        name: profile.name || profile.email.split('@')[0],
+        picture: profile.picture,
+      },
+      accessToken,
+      ''
+    );
+  };
+
+  // Google OAuth hook via @react-oauth/google
+  const triggerGoogleLoginWeb = useGoogleLogin({
+    onSuccess: async (tokenResponse) => {
+      console.log('[Google Auth] OAuth success tokenResponse:', tokenResponse);
+      const accessToken = tokenResponse.access_token;
+      if (!accessToken) {
+        setAuthenticating(false, 'No access token returned by Google OAuth.');
+        return;
+      }
+      try {
+        await fetchRealGoogleProfile(accessToken);
+      } catch (err: any) {
+        console.error('[Google UserInfo Error]:', err);
+        setAuthenticating(false, err.message || 'Failed to fetch Google profile.');
+      } finally {
+        setStatusText(null);
+      }
+    },
+    onError: (errorResponse) => {
+      console.error('[Google OAuth Error Response]:', errorResponse);
+      setAuthenticating(false, 'Google Sign-In popup failed or was closed by user.');
+      setStatusText(null);
+    },
+    scope: 'openid email profile https://www.googleapis.com/auth/drive.appdata',
+  });
+
+  // Direct OAuth 2.0 window.open popup fallback if Google GIS script is delayed or blocked
+  const triggerDirectWindowPopup = () => {
+    console.log('[Google Auth] Triggering direct OAuth popup window fallback...');
+    const redirectUri = window.location.origin;
+    const scopes = encodeURIComponent(
+      'openid email profile https://www.googleapis.com/auth/drive.appdata'
+    );
+    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${GOOGLE_CLIENT_ID}&redirect_uri=${encodeURIComponent(
+      redirectUri
+    )}&response_type=token&scope=${scopes}&prompt=select_account`;
+
+    const width = 500;
+    const height = 650;
+    const left = window.screenX + (window.outerWidth - width) / 2;
+    const top = window.screenY + (window.outerHeight - height) / 2;
+
+    const popup = window.open(
+      authUrl,
+      'google_oauth_popup',
+      `width=${width},height=${height},top=${top},left=${left},scrollbars=yes,status=yes`
+    );
+
+    if (!popup) {
+      setAuthenticating(false, 'Popup window blocked. Please enable popups for this domain.');
+      setStatusText(null);
+      return;
+    }
+
+    const timer = setInterval(() => {
+      try {
+        if (!popup || popup.closed) {
+          clearInterval(timer);
+          setAuthenticating(false, null);
+          setStatusText(null);
+          return;
+        }
+
+        if (popup.location && popup.location.href.includes('access_token=')) {
+          const hash = popup.location.hash || popup.location.search;
+          const params = new URLSearchParams(hash.replace('#', '?'));
+          const accessToken = params.get('access_token');
+          popup.close();
+          clearInterval(timer);
+
+          if (accessToken) {
+            fetchRealGoogleProfile(accessToken).catch((e) => {
+              setAuthenticating(false, e.message || 'Failed to fetch user profile from token.');
+            });
+          }
+        }
+      } catch {
+        // Cross-origin restriction while popup is on google.com
+      }
+    }, 500);
+  };
+
+  // Check URL hash on load in case of OAuth redirect callback
+  useEffect(() => {
+    if (window.location.hash.includes('access_token=')) {
+      const params = new URLSearchParams(window.location.hash.replace('#', '?'));
+      const accessToken = params.get('access_token');
+      if (accessToken) {
+        window.history.replaceState(null, '', window.location.pathname);
+        setAuthenticating(true, null);
+        fetchRealGoogleProfile(accessToken).catch((e) => {
+          setAuthenticating(false, e.message || 'Failed to fetch profile from token.');
+        });
+      }
+    }
+  }, []);
+
+  // Main Google Login Click Handler
   const handleGoogleLogin = async () => {
+    console.log("Google Login Button Clicked");
+    setAuthenticating(true, null);
+    setStatusText('Opening Google Sign-In popup...');
+
     if (isTauri) {
       try {
-        setAuthenticating(true, null);
         setStatusText('Starting 127.0.0.1 desktop loopback server & opening default browser...');
 
         const { invoke } = await import('@tauri-apps/api/core');
-        // Rust starts 127.0.0.1 loopback, opens browser, catches code, exchanges token, stores in Rust AuthState
         const profile = await invoke<{
           id: string;
           email: string;
@@ -36,7 +168,6 @@ export const LoginView: React.FC = () => {
 
         setStatusText('Authenticated! Checking Google Drive appDataFolder for cloud backup...');
 
-        // Rust pulls and decrypts RentFlow_FullBackup.enc into native SQLCipher SQLite
         try {
           const restoreResult = await invoke<{ restored: boolean; message: string }>('drive_pull_backup', {
             googleId: profile.id,
@@ -48,7 +179,6 @@ export const LoginView: React.FC = () => {
           console.warn('[Desktop Backup Pull] Ignored backup check error:', e);
         }
 
-        // Token security: raw access_token & refresh_token remain locked in Rust memory / Stronghold vault
         setGoogleSession(
           {
             sub: profile.id,
@@ -70,38 +200,14 @@ export const LoginView: React.FC = () => {
         setStatusText(null);
       }
     } else {
-      // Browser preview environment: authenticate with simulated local session
-      setAuthenticating(true, null);
-      setStatusText('Logging in with Google identity in preview mode...');
-      setTimeout(() => {
-        setGoogleSession(
-          {
-            sub: 'google_user_demo_101',
-            email: 'admin@rentflow.app',
-            name: 'Portfolio Owner',
-            picture: undefined,
-          },
-          'web_preview_session_token',
-          ''
-        );
-        setAuthenticating(false, null);
-        setStatusText(null);
-      }, 500);
+      // Web Environment: Trigger Google OAuth 2.0 Popup
+      try {
+        triggerGoogleLoginWeb();
+      } catch (e) {
+        console.warn('[Google OAuth] GIS hook fallback to direct window popup:', e);
+        triggerDirectWindowPopup();
+      }
     }
-  };
-
-  // Instant Test / Demo Session
-  const handleTestDemoLogin = () => {
-    setGoogleSession(
-      {
-        sub: 'demo_user_101',
-        email: 'alex.morgan@horizonproperty.com',
-        name: 'Alex Morgan (Demo Admin)',
-        picture: undefined,
-      },
-      'demo_access_token_web_session',
-      ''
-    );
   };
 
   return (
@@ -116,7 +222,7 @@ export const LoginView: React.FC = () => {
             RentFlow Desktop
           </h1>
           <p className="text-xs text-[var(--text-secondary)] mt-1 max-w-xs">
-            Native Desktop Property Management &bull; Zero-Knowledge SQLite Encryption
+            Property Management Suite &bull; Google OAuth Identity
           </p>
         </div>
 
@@ -124,11 +230,11 @@ export const LoginView: React.FC = () => {
         <Card className="p-6 sm:p-8 space-y-6 text-left border border-[var(--border-strong)] rounded-2xl shadow-lg bg-[var(--bg-surface)]">
           <div className="flex items-center justify-between pb-3 border-b border-[var(--border-subtle)]">
             <span className="text-xs font-bold text-[var(--text-primary)] uppercase tracking-wider">
-              Native Desktop Authentication
+              Google Account Authentication
             </span>
             <Badge variant="success" className="gap-1">
               <ShieldCheck className="w-3 h-3 text-emerald-600" />
-              <span>Rust Loopback + Stronghold</span>
+              <span>OAuth 2.0 SSL Verified</span>
             </Badge>
           </div>
 
@@ -138,9 +244,9 @@ export const LoginView: React.FC = () => {
                 <Folder className="w-3.5 h-3.5" />
               </div>
               <div>
-                <strong className="text-[var(--text-primary)]">Native Loopback Flow (127.0.0.1):</strong>
+                <strong className="text-[var(--text-primary)]">Google OAuth 2.0 Popup:</strong>
                 <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
-                  Opens your system default browser with PKCE verification and captures the callback on a local loopback server.
+                  Sign in with your Google Account. A popup window will prompt account selection and consent.
                 </p>
               </div>
             </div>
@@ -150,9 +256,9 @@ export const LoginView: React.FC = () => {
                 <Lock className="w-3.5 h-3.5" />
               </div>
               <div>
-                <strong className="text-[var(--text-primary)]">Token Security at Rest:</strong>
+                <strong className="text-[var(--text-primary)]">Verified Account Profile:</strong>
                 <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
-                  Access and refresh tokens are securely retained in the Rust native backend. Raw credentials are never transmitted to the frontend.
+                  Your identity is fetched directly from Google's UserInfo API (<code className="font-mono text-[10px] bg-[var(--bg-base)] px-1 py-0.5 rounded">googleapis.com/oauth2/v3/userinfo</code>).
                 </p>
               </div>
             </div>
@@ -162,9 +268,9 @@ export const LoginView: React.FC = () => {
                 <Database className="w-3.5 h-3.5" />
               </div>
               <div>
-                <strong className="text-[var(--text-primary)]">Encrypted SQLite & Cloud Sync:</strong>
+                <strong className="text-[var(--text-primary)]">Encrypted Backup Vault:</strong>
                 <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
-                  Native SQLCipher database automatically pushes and pulls AES-256 encrypted backups to Google Drive <code className="font-mono text-[10px] bg-[var(--bg-base)] px-1 py-0.5 rounded">appDataFolder</code>.
+                  Google Drive synchronization backs up your portfolio to your account's private <code className="font-mono text-[10px] bg-[var(--bg-base)] px-1 py-0.5 rounded">appDataFolder</code>.
                 </p>
               </div>
             </div>
@@ -175,7 +281,7 @@ export const LoginView: React.FC = () => {
               <RefreshCw className="w-4 h-4 animate-spin shrink-0" />
               <div>
                 <strong className="block font-semibold">Authenticating with Google...</strong>
-                <span className="text-[11px] opacity-90">{statusText || 'Opening System Default Browser...'}</span>
+                <span className="text-[11px] opacity-90">{statusText || 'Opening Google Sign-In Popup...'}</span>
               </div>
             </div>
           )}
@@ -214,29 +320,17 @@ export const LoginView: React.FC = () => {
                   d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
                 />
               </svg>
-              <span>{isAuthenticating ? 'Connecting to Google...' : (isTauri ? 'Sign in with Google (Desktop Loopback)' : 'Sign in with Google')}</span>
+              <span>{isAuthenticating ? 'Connecting to Google...' : 'Sign in with Google'}</span>
             </Button>
 
-            {!isTauri && (
-              <Button
-                type="button"
-                variant="outline"
-                className="w-full py-2.5 h-10 gap-2 text-xs font-semibold rounded-xl text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--accent)] border-dashed transition-all"
-                onClick={handleTestDemoLogin}
-              >
-                <UserCheck className="w-3.5 h-3.5 text-indigo-500" />
-                <span>Continue as Test Portfolio Manager</span>
-              </Button>
-            )}
-
             <p className="text-[10px] font-mono text-[var(--text-secondary)] mt-2 text-center break-all bg-[var(--bg-base)] p-1.5 rounded border border-[var(--border-subtle)] select-all">
-              Environment: {isTauri ? 'Desktop (Tauri v2 Native)' : 'Web Browser Preview'} &bull; Client ID: {GOOGLE_CLIENT_ID.slice(0, 16)}…
+              Environment: {isTauri ? 'Desktop (Tauri v2 Native)' : 'Web Browser'} &bull; Client ID: {GOOGLE_CLIENT_ID.slice(0, 16)}…
             </p>
           </div>
         </Card>
 
         <p className="text-[11px] text-[var(--text-secondary)]">
-          RentFlow Property Manager &bull; Tauri v2 Desktop Engine
+          RentFlow Property Manager &bull; Google OAuth 2.0 Identity Engine
         </p>
       </div>
     </div>

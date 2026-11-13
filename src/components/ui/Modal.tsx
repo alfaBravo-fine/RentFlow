@@ -58,16 +58,16 @@ export const Modal: React.FC<ModalProps> = ({
         aria-modal="true"
       >
         {/* Header */}
-        <div className="flex items-start justify-between border-b border-[var(--border-subtle)] px-6 py-5 shrink-0">
-          <div>
-            <h2 className="text-lg font-semibold text-[var(--text-primary)] tracking-tight">{title}</h2>
+        <div className="flex items-start justify-between border-b border-[var(--border-subtle)] px-6 py-5 shrink-0 min-w-0 gap-3">
+          <div className="min-w-0 flex-1">
+            <h2 className="text-lg font-semibold text-[var(--text-primary)] tracking-tight break-words">{title}</h2>
             {description && (
-              <p className="text-xs text-[var(--text-secondary)] mt-0.5">{description}</p>
+              <p className="text-xs text-[var(--text-secondary)] mt-0.5 break-words">{description}</p>
             )}
           </div>
           <button
             onClick={onClose}
-            className="w-8 h-8 rounded-full flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-base)] transition-colors focus-ring cursor-pointer -mr-1"
+            className="w-8 h-8 rounded-full flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-base)] transition-colors focus-ring cursor-pointer -mr-1 shrink-0"
             title="Close"
           >
             <X className="h-4 w-4" />
@@ -75,7 +75,7 @@ export const Modal: React.FC<ModalProps> = ({
         </div>
 
         {/* Scrollable Content Body */}
-        <div className="p-6 overflow-y-auto flex-1">{children}</div>
+        <div className="p-6 overflow-y-auto flex-1 min-w-0">{children}</div>
       </div>
     </div>
   );

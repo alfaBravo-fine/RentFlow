@@ -507,9 +507,9 @@ button:not(:disabled):active,
     visibility: visible !important;
   }
   
-  /* Suppress screen modals, dialogs, headers, and navigation */
-  [role="dialog"]:not(.print-area),
-  .modal-container:not(.print-area),
+  /* Suppress screen modals, dialogs, headers, and navigation unless they hold the active print-area */
+  [role="dialog"]:not(.print-area):not(:has(.print-area)),
+  .modal-container:not(.print-area):not(:has(.print-area)),
   .modal-backdrop,
   .no-print,
   button,
@@ -523,6 +523,7 @@ button:not(:disabled):active,
   /* Absolute Top-Left Print Area & Layout Cleanup */
   .print-area,
   #print-root {
+    display: block !important;
     position: absolute !important;
     top: 0 !important;
     left: 0 !important;
