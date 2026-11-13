@@ -116,6 +116,10 @@ export class RentFlowDexieDatabase extends Dexie {
       ...storesV1,
       deposit_deductions: 'id, deposit_id, lease_id, created_at, updated_at, deleted_at',
     });
+    this.version(3).stores({
+      ...storesV1,
+      deposit_deductions: 'id, deposit_id, lease_id, tenant_id, created_at, updated_at, deleted_at',
+    });
   }
 }
 

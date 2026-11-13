@@ -219,6 +219,7 @@ export interface DepositDeduction {
   id: string;
   deposit_id: string;
   lease_id: string;
+  tenant_id?: string | null;
   amount_minor: number;
   currency_code: string;
   reason: string;

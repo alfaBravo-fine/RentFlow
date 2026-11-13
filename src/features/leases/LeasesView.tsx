@@ -515,19 +515,24 @@ export const LeasesView: React.FC = () => {
                 <div>
                   {/* Card Header */}
                   <div className="flex items-start justify-between gap-3 mb-4">
-                    <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setDetailsLeaseId(lease.id)}
+                      className="flex items-center gap-3 text-left min-w-0 group/title cursor-pointer"
+                      title="Open Lease Details & Deduction History"
+                    >
                       <div className="w-10 h-10 rounded-2xl bg-[var(--accent-subtle)] text-[var(--accent)] flex items-center justify-center shrink-0">
                         <FileText className="w-5 h-5" />
                       </div>
-                      <div>
-                        <h3 className="text-sm font-bold text-[var(--text-primary)] tracking-tight line-clamp-1">
+                      <div className="min-w-0">
+                        <h3 className="text-sm font-bold text-[var(--text-primary)] group-hover/title:text-[var(--accent)] transition-colors tracking-tight line-clamp-1">
                           {humanName}
                         </h3>
-                        <p className="text-xs text-[var(--text-secondary)] mt-0.5">
+                        <p className="text-xs text-[var(--text-secondary)] mt-0.5 truncate">
                           {property?.name} &bull; {unit?.name}
                         </p>
                       </div>
-                    </div>
+                    </button>
 
                     {/* Action Dropdown Menu */}
                     <div className="relative">

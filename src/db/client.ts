@@ -151,8 +151,64 @@ export class DBClient {
     }
 
     this.hydrated = true;
+    this.backfillDepositDeductions();
     this.syncUnitOccupancy();
     this.notifyWrite();
+  }
+
+  private backfillDepositDeductions(): void {
+    const leases = this.getMemoryTable<Lease>('leases');
+    const deposits = this.getMemoryTable<Deposit>('deposits');
+    const existingDeductions = this.getMemoryTable<DepositDeduction>('deposit_deductions');
+
+    const leaseById = new Map(leases.map((l) => [l.id, l]));
+    const existingIds = new Set(existingDeductions.map((d) => d.id));
+    let changed = false;
+
+    const updatedDeductions = existingDeductions.map((dd) => {
+      if (!dd.tenant_id) {
+        const lease = leaseById.get(dd.lease_id);
+        if (lease?.tenant_id) {
+          changed = true;
+          return { ...dd, tenant_id: lease.tenant_id };
+        }
+      }
+      return dd;
+    });
+
+    for (const deposit of deposits) {
+      if (deposit.deleted_at || (deposit as any).deletedAt) continue;
+      const parsed = parseDepositDeductions(deposit.deductions_json);
+      if (parsed.length === 0) continue;
+      const lease = leaseById.get(deposit.lease_id);
+      for (const item of parsed) {
+        const itemId = item.id || `${deposit.id}_${item.reason}_${item.amount_minor}`;
+        if (!existingIds.has(itemId) && Number(item.amount_minor) > 0) {
+          existingIds.add(itemId);
+          const ts = item.date ? new Date(item.date).getTime() || deposit.updated_at : deposit.updated_at;
+          updatedDeductions.push({
+            id: itemId,
+            deposit_id: deposit.id,
+            lease_id: deposit.lease_id,
+            tenant_id: lease?.tenant_id || null,
+            amount_minor: Number(item.amount_minor),
+            currency_code: deposit.currency_code || lease?.currency_code || 'USD',
+            reason: item.reason || 'Security Deposit Deduction',
+            receipt_note: null,
+            deducted_at: item.date || new Date(ts || Date.now()).toISOString(),
+            created_at: ts || Date.now(),
+            updated_at: deposit.updated_at || Date.now(),
+            device_id: deposit.device_id || this.deviceId,
+            deleted_at: null,
+          });
+          changed = true;
+        }
+      }
+    }
+
+    if (changed) {
+      this.setMemoryTable('deposit_deductions', updatedDeductions);
+    }
   }
 
   // Reactive DB write subscription
@@ -1428,13 +1484,17 @@ export class DBClient {
     const prevAudit = [...this.getMemoryTable<AuditLog>('audit_log')];
     const prevSync = [...this.getMemoryTable<SyncQueueItem>('sync_queue')];
 
+    const lease =
+      this.getItem<Lease>('leases', leaseId) ||
+      this.getRawTable<Lease>('leases').find((l) => l.id === leaseId);
+    const tenantId = lease?.tenant_id || null;
+
     let deposit = prevDeposits.find(
       (d) => d.lease_id === leaseId && !d.deleted_at && !(d as any).deletedAt
     );
     let isNewDepositRecord = false;
 
     if (!deposit) {
-      const lease = this.getItem<Lease>('leases', leaseId);
       if (!lease || !lease.deposit_minor || lease.deposit_minor <= 0) {
         throw new Error('No security deposit found for this lease.');
       }
@@ -1493,6 +1553,7 @@ export class DBClient {
       id: generateUUID(),
       deposit_id: deposit!.id,
       lease_id: leaseId,
+      tenant_id: tenantId,
       amount_minor: item.amountMinor,
       currency_code: deposit!.currency_code || 'USD',
       reason: item.reason,
@@ -1663,6 +1724,7 @@ export class DBClient {
       }
     }
 
+    this.backfillDepositDeductions();
     this.notifyWrite();
 
     try {
@@ -1766,6 +1828,7 @@ export class DBClient {
       await tauriDbImportAll(tablesMap);
     }
 
+    this.backfillDepositDeductions();
     this.syncUnitOccupancy();
     this.notifyWrite();
 

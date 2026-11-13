@@ -112,6 +112,9 @@ describe('Security Deposit Deduction & Vacant Unit Filtering Tests', () => {
     const ledgerRows = db.getTable<DepositDeduction>('deposit_deductions');
     expect(ledgerRows).toHaveLength(2);
     expect(ledgerRows.reduce((s, r) => s + r.amount_minor, 0)).toBe(500000);
+    expect(ledgerRows.every((r) => r.tenant_id === 'ten_ded_1')).toBe(true);
+    expect(ledgerRows.every((r) => typeof r.deducted_at === 'string' && r.deducted_at.length > 0)).toBe(true);
+    expect(ledgerRows.map((r) => r.reason).sort()).toEqual(['Deep cleaning', 'Wall painting']);
 
     // Ensure no records are created in expenses or invoices
     expect(db.getTable('expenses')).toHaveLength(0);
@@ -142,5 +145,39 @@ describe('Security Deposit Deduction & Vacant Unit Filtering Tests', () => {
         deductions: [{ id: '2', reason: 'Cleaning', amount_minor: 1000, date: '2026-01-02' }],
       })
     ).toHaveLength(1);
+  });
+
+  it('backfills legacy deductions_json entries into deposit_deductions with tenant_id on import', async () => {
+    await db.importAllDataAsync({
+      leases: db.getTable<Lease>('leases'),
+      deposits: [
+        {
+          id: 'dep_legacy_1',
+          lease_id: 'lease_ded_1',
+          amount_minor: 444500,
+          currency_code: 'PKR',
+          received_at: '2026-01-01',
+          status: 'partially_returned',
+          interest_accrued_minor: 0,
+          returned_minor: 439000,
+          deductions_json: JSON.stringify({
+            deductions: [
+              { id: 'leg_ded_1', reason: 'Key replacement', amount_minor: 5500, date: '2026-11-12T10:00:00.000Z' },
+            ],
+          }),
+          updated_at: Date.now(),
+          device_id: 'dev_test',
+          deleted_at: null,
+        },
+      ],
+      deposit_deductions: [],
+    });
+
+    const rows = db.getTable<DepositDeduction>('deposit_deductions');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe('leg_ded_1');
+    expect(rows[0].tenant_id).toBe('ten_ded_1');
+    expect(rows[0].amount_minor).toBe(5500);
+    expect(rows[0].reason).toBe('Key replacement');
   });
 });

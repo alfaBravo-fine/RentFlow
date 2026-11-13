@@ -448,6 +448,7 @@ impl DatabaseManager {
                 id TEXT PRIMARY KEY,
                 deposit_id TEXT NOT NULL,
                 lease_id TEXT NOT NULL,
+                tenant_id TEXT,
                 amount_minor INTEGER NOT NULL,
                 currency_code TEXT NOT NULL DEFAULT 'USD',
                 reason TEXT NOT NULL,
@@ -635,6 +636,7 @@ impl DatabaseManager {
             "ALTER TABLE utility_bills ADD COLUMN split_method TEXT;",
             "ALTER TABLE utility_bills ADD COLUMN splits_json TEXT;",
             "ALTER TABLE utility_bills ADD COLUMN created_at INTEGER;",
+            "ALTER TABLE deposit_deductions ADD COLUMN tenant_id TEXT;",
         ];
         for stmt in alter_statements {
             let _ = conn.execute(stmt, []);
