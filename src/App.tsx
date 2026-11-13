@@ -133,11 +133,7 @@ function AuthenticatedContent() {
 }
 
 function AuthenticatedApp() {
-  return (
-    <HashRouter>
-      <AuthenticatedContent />
-    </HashRouter>
-  );
+  return <AuthenticatedContent />;
 }
 
 export default function App() {
@@ -145,7 +141,7 @@ export default function App() {
   const user = useAuthStore((s) => s.user);
 
   return (
-    <>
+    <HashRouter>
       <SplashScreen durationMs={1400} />
       <AppErrorBoundary>
         <ThemeProvider>
@@ -165,6 +161,6 @@ export default function App() {
         </ThemeProvider>
       </AppErrorBoundary>
       <div id="print-root" className="hidden print:block bg-white text-black"></div>
-    </>
+    </HashRouter>
   );
 }

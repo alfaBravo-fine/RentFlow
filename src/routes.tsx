@@ -42,6 +42,7 @@ export const AppRoutes: React.FC = () => {
       <Route path="/reports" element={<ReportsView />} />
       <Route path="/sync" element={<SyncView />} />
       <Route path="/settings" element={<SettingsView />} />
+      <Route path="*" element={<DashboardView />} />
     </Routes>
   );
 };

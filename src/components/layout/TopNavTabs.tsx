@@ -80,7 +80,7 @@ export const TopNavTabs: React.FC = () => {
         {/* Brand Header */}
         <div className="flex items-center gap-3 shrink-0">
           <img
-            src="/assets/icon.png"
+            src="./assets/icon.png"
             alt="RentFlow"
             className="w-8 h-8 object-contain rounded-xl shrink-0 shadow-xs"
           />

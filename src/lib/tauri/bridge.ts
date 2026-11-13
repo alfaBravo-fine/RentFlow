@@ -7,11 +7,11 @@
 import { Invoice, Lease, Payment, Property, Tenant, Unit } from '../../db/schema';
 
 export function isTauri(): boolean {
-  return typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__ !== undefined;
+  return typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__);
 }
 
 async function invokeTauri<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  if (!isTauri()) {
+  if (typeof window === 'undefined' || !(window as any).__TAURI_INTERNALS__) {
     throw new Error(`Tauri is not available in browser mode. Command '${cmd}' skipped.`);
   }
 

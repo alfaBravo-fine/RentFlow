@@ -16,7 +16,7 @@ export interface BackupSyncResult {
 }
 
 export function isTauri(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+  return typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__);
 }
 
 const STORAGE_USER_KEY = 'rentflow_google_user';
@@ -72,7 +72,7 @@ export async function tauriGoogleLogin(): Promise<UserProfile> {
   console.log('[RentFlow Auth Debug] import.meta.env.VITE_GOOGLE_CLIENT_ID:', envClientId);
 
   // 1. Desktop Tauri Environment
-  if (isTauri()) {
+  if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
     console.log('[RentFlow Auth Debug] Running in Tauri environment. Invoking google_login Rust command...');
     const { invoke } = await import('@tauri-apps/api/core');
     const profile = await invoke<UserProfile>('google_login');
@@ -175,7 +175,7 @@ export async function tauriGoogleLogin(): Promise<UserProfile> {
  * Logout
  */
 export async function tauriGoogleLogout(): Promise<void> {
-  if (isTauri()) {
+  if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('google_logout');
@@ -208,7 +208,7 @@ export async function tauriUploadBackup(
   backupJson: string,
   googleId: string
 ): Promise<BackupSyncResult> {
-  if (isTauri()) {
+  if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
     const { invoke } = await import('@tauri-apps/api/core');
     return await invoke<BackupSyncResult>('upload_backup', {
       backupJson,
@@ -254,7 +254,7 @@ export async function tauriUploadBackup(
  * Real Download Backup
  */
 export async function tauriDownloadBackup(googleId: string): Promise<string | null> {
-  if (isTauri()) {
+  if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
     const { invoke } = await import('@tauri-apps/api/core');
     const json = await invoke<string>('download_backup', { googleId });
     if (json && json !== '{}') return json;

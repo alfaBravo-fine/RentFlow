@@ -187,7 +187,7 @@ export const Topbar: React.FC<TopbarProps> = ({ isDarkMode, onToggleTheme, onOpe
             >
               <Menu className="w-5 h-5" />
             </button>
-            <img src="/assets/icon.png" alt="RentFlow" className="w-7 h-7 object-contain" />
+            <img src="./assets/icon.png" alt="RentFlow" className="w-7 h-7 object-contain" />
           </div>
 
           {/* Global Search Input Bar (Linear style) */}

@@ -154,7 +154,7 @@ export const LoginView: React.FC = () => {
     setAuthenticating(true, null);
     setStatusText('Opening Google Sign-In popup...');
 
-    if (isTauri) {
+    if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
       try {
         setStatusText('Starting 127.0.0.1 desktop loopback server & opening default browser...');
 

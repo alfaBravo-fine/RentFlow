@@ -110,7 +110,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpenMobile, onCloseMobile })
         <div className="h-16 flex items-center justify-between px-5 border-b border-[var(--border-subtle)]">
           <div className="flex items-center gap-3">
             <img
-              src="/assets/icon.png"
+              src="./assets/icon.png"
               alt="RentFlow"
               className="w-8 h-8 object-contain rounded-xl shrink-0"
             />

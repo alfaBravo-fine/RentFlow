@@ -251,7 +251,7 @@ export class DatabaseService implements IDatabaseService {
 
     this.initPromise = (async () => {
       try {
-        if (isTauri()) {
+        if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
           try {
             const { invoke } = await import('@tauri-apps/api/core');
             await invoke<string>('db_init');
@@ -262,6 +262,8 @@ export class DatabaseService implements IDatabaseService {
           } catch (err) {
             console.warn('[DatabaseService] Tauri SQLite init notice:', err);
           }
+        } else {
+          await db.hydrateFromDexie();
         }
 
         this.isInitialized = true;
@@ -965,7 +967,7 @@ export class DatabaseService implements IDatabaseService {
   public async getItem<
     T extends { id: string; deleted_at?: number | null; deletedAt?: number | null },
   >(tableName: string, id: string): Promise<T | null> {
-    if (isTauri()) {
+    if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
         const item = await invoke<T | null>('db_get_item', { tableName, id });
